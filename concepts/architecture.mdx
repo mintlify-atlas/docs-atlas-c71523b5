@@ -1,0 +1,175 @@
+---
+title: "Prisma Engine architecture and system design"
+description: "Learn how Prisma Engine's modular Driver-Device architecture separates platform-specific backends from high-level engine systems and game code."
+---
+
+Prisma Engine is built around a layered, modular architecture that cleanly separates your game code from platform-specific details. The engine compiles only the backends your target platform needs, wires them together through well-defined interfaces, and exposes a single consistent API to your application regardless of whether it runs on Windows, Linux, or Android.
+
+## Layered architecture
+
+Three distinct layers form the engine's structure. Each layer depends only on the one below it, never on concrete platform implementations directly.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Application Layer                        │
+│              (Runtime · Game code · Editor)                  │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│                    Device Layer (high-level abstraction)      │
+│   ┌─────────────────┐         ┌─────────────────┐           │
+│   │   AudioDevice   │         │   InputDevice    │           │
+│   │  3D audio       │         │  action mapping  │           │
+│   │  resource mgmt  │         │  text input      │           │
+│   └────────┬────────┘         └────────┬────────┘           │
+└────────────┼──────────────────────────┼─────────────────────┘
+             │                          │
+┌────────────▼──────────────────────────▼─────────────────────┐
+│                  Driver Layer (platform interface)            │
+│         IAudioDriver / IInputDriver (pure-virtual contracts)  │
+└──────────┬────────────────────────────┬─────────────────────┘
+           │                            │
+┌──────────▼────────────────────────────▼─────────────────────┐
+│                 Platform Drivers                              │
+│   ┌──────────┐    ┌──────────┐    ┌──────────┐              │
+│   │ Windows  │    │ Android  │    │ SDL3 /   │              │
+│   │ XAudio2  │    │ AAudio   │    │ cross-   │              │
+│   │ RawInput │    │ GameAct. │    │ platform │              │
+│   └──────────┘    └──────────┘    └──────────┘              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## The Driver-Device pattern
+
+The Driver-Device pattern is the central design decision in Prisma Engine. It applies to the audio and input subsystems and will be extended to other subsystems as the engine matures.
+
+**Driver** — a thin adapter that implements a pure-virtual interface (`IAudioDriver`, `IInputDriver`) and talks directly to one platform API (XAudio2, AAudio, SDL3, etc.). Drivers contain no high-level logic; they only translate engine calls into platform calls.
+
+**Device** — a platform-agnostic class (`AudioDevice`, `InputDevice`) that owns a driver and builds useful features on top of it: 3D audio positioning, action mapping, text input state, and so on. Your game code calls Device methods and never touches a Driver directly.
+
+Adding support for a new platform means writing one new Driver implementation. The Device, and all game code that uses it, remain unchanged.
+
+### Design principles behind the pattern
+
+| Principle | How the engine applies it |
+|---|---|
+| Single responsibility | Drivers handle platform API calls. Devices handle high-level logic. |
+| Interface segregation | Driver interfaces are minimal — only the methods each consumer needs. |
+| Dependency inversion | Devices depend on the interface, never on a concrete driver class. |
+| Open/closed | New platforms require a new driver file only, no changes to existing code. |
+
+## Key subsystems
+
+<CardGroup cols={2}>
+  <Card title="Rendering" icon="display" href="/systems/rendering">
+    DirectX 12 (Windows), Vulkan (Windows, Linux, Android), and OpenGL (Linux fallback). Forward and deferred render pipelines with HLSL and GLSL shader support.
+  </Card>
+  <Card title="Audio" icon="volume-high" href="/systems/audio">
+    SDL3 cross-platform backend. XAudio2 and AAudio native backends exist but are pending an interface refactor. Configured via `PRISMA_ENABLE_AUDIO_*` CMake options.
+  </Card>
+  <Card title="Entity Component System" icon="sitemap" href="/concepts/ecs">
+    Data-oriented ECS with typed component pools, system scheduling, and a singleton `World`. Game logic lives in systems; data lives in components.
+  </Card>
+  <Card title="Resource management" icon="box-archive" href="/systems/resource-management">
+    Thread-safe `AssetManager` with JSON and Base64+zstd binary serialization. Supports textures, meshes, tilemaps (TMX), and cubemaps.
+  </Card>
+</CardGroup>
+
+## Project structure
+
+```
+PrismaEngine/
+├── src/
+│   ├── engine/
+│   │   ├── audio/         # AudioDevice + IAudioDriver + platform drivers
+│   │   ├── core/          # ECS, AssetManager, Layer, Event, Timestep
+│   │   ├── graphic/
+│   │   │   ├── adapters/  # dx12/ and vulkan/ renderer implementations
+│   │   │   ├── interfaces/# Renderer interfaces (IRenderDevice, etc.)
+│   │   │   └── pipelines/ # Forward / Deferred render pipelines
+│   │   ├── input/         # InputDevice + IInputDriver + platform drivers
+│   │   ├── math/          # GLM-backed math types
+│   │   ├── platform/      # PlatformWindows / Linux / Android
+│   │   └── resource/      # Resource loading helpers
+│   ├── editor/            # ImGui editor application
+│   ├── game/              # Game framework helpers
+│   └── runtime/           # Platform entry points (windows/, linux/, android/, web/)
+├── resources/
+│   ├── common/shaders/    # hlsl/ and glsl/ shader sources
+│   └── runtime/           # Per-platform runtime assets
+└── cmake/                 # CMake modules and device options
+```
+
+## Namespace conventions
+
+All engine code lives under the `Prisma` namespace. Subsystems use nested namespaces:
+
+```cpp
+namespace Prisma {
+    namespace Graphic {
+        // Rendering interfaces and adapters
+    }
+    namespace Audio {
+        // AudioDevice and driver implementations
+    }
+    namespace Input {
+        // InputDevice and driver implementations
+    }
+    namespace Core::ECS {
+        // World, ISystem, EntityID
+    }
+}
+```
+
+## Conditional compilation with `PRISMA_ENABLE_*`
+
+Engine modules are gated behind CMake feature flags that become preprocessor defines. This keeps platform-specific code out of binaries that don't need it.
+
+```cpp
+#if defined(PRISMA_ENABLE_RENDER_VULKAN)
+    // Vulkan-specific initialization
+#endif
+
+#if defined(PRISMA_ENABLE_AUDIO_SDL3)
+    // SDL3 audio backend code
+#endif
+```
+
+All available flags are defined in `cmake/DeviceOptions.cmake`. The most commonly used ones are:
+
+| Flag | Default | Description |
+|---|---|---|
+| `PRISMA_ENABLE_RENDER_DX12` | ON (Windows) | DirectX 12 rendering backend |
+| `PRISMA_ENABLE_RENDER_VULKAN` | ON (Android) | Vulkan rendering backend |
+| `PRISMA_ENABLE_RENDER_OPENGL` | OFF | OpenGL fallback backend |
+| `PRISMA_ENABLE_AUDIO_SDL3` | ON | SDL3 cross-platform audio |
+| `PRISMA_ENABLE_IMGUI_DEBUG` | ON (Debug) | ImGui editor overlay |
+
+<Tip>
+  Configure backends at CMake time rather than with runtime checks. Choosing the right preset (e.g., `editor-windows-x64-debug`) automatically enables the correct flags for your platform.
+</Tip>
+
+## Native vs. cross-platform mode
+
+The engine supports two input and audio modes:
+
+<Tabs>
+  <Tab title="Native mode (default)">
+    Platform-specific APIs are used directly for best performance and integration:
+
+    - **Windows**: DirectX 12 rendering, XInput gamepad, RawInput keyboard/mouse
+    - **Android**: Vulkan rendering, GameActivity input, AAudio (planned)
+    - **Linux**: Vulkan or OpenGL rendering (in development)
+
+    ```bash
+    cmake --preset engine-windows-x64-debug
+    ```
+  </Tab>
+  <Tab title="Cross-platform mode (SDL3)">
+    SDL3 handles audio and input on every platform. Useful for rapid prototyping or targeting multiple platforms from one build configuration.
+
+    ```bash
+    cmake -DPRISMA_USE_NATIVE_AUDIO=OFF -DPRISMA_USE_NATIVE_INPUT=OFF ..
+    ```
+  </Tab>
+</Tabs>

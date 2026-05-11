@@ -1,0 +1,241 @@
+---
+title: "Audio system: SDL3 and platform-native backends"
+description: "Prisma Engine's audio system uses a Driver-Device pattern with SDL3 for cross-platform audio and native backends for Windows and Android."
+---
+
+Prisma Engine's audio system provides cross-platform sound playback through a two-layer Driver-Device abstraction. The `IAudioDevice` interface decouples game logic from platform APIs, while pluggable backends handle the actual hardware interaction. SDL3 is the primary cross-platform backend; XAudio2 (Windows) and AAudio (Android) are planned native alternatives.
+
+## Driver-Device pattern
+
+The audio stack separates concerns across two layers:
+
+```
+Game layer
+  └── IAudioDevice  (high-level interface: Play, Stop, SetVolume, 3D positioning)
+        ├── AudioDeviceSDL3    — SDL3 (cross-platform, default)
+        ├── AudioDeviceXAudio2 — XAudio2 (Windows, disabled pending refactor)
+        ├── AudioDeviceAAudio  — AAudio (Android, planned)
+        └── AudioDeviceNull    — Silent fallback for headless / testing
+```
+
+`AudioDevice` (the concrete manager) selects a backend at runtime based on the `AudioDesc::deviceType` field. Set `AudioDeviceType::Auto` to let the engine pick the best available backend for the current platform.
+
+## SDL3 backend
+
+`AudioDeviceSDL3` is the default cross-platform backend. It opens an `SDL_AudioDeviceID`, mixes voices via `SDL_AudioStream`, and supports up to 256 concurrent voices by default.
+
+```cpp
+// From src/engine/audio/AudioDeviceSDL3.h
+namespace Prisma::Audio {
+
+class AudioDeviceSDL3 : public IAudioDevice {
+public:
+    bool Initialize(const AudioDesc& desc) override;
+    void Shutdown() override;
+    void Update(Prisma::Timestep ts) override;
+
+    AudioVoiceId Play(const AudioClip& clip, const PlayDesc& desc = {}) override;
+    void Stop(AudioVoiceId voiceId) override;
+    void Pause(AudioVoiceId voiceId) override;
+    void Resume(AudioVoiceId voiceId) override;
+    void StopAll() override;
+
+    void SetVolume(AudioVoiceId voiceId, float volume) override;  // 0.0 – 1.0
+    void SetPitch(AudioVoiceId voiceId, float pitch) override;    // 0.5 – 2.0
+    void SetMasterVolume(float volume) override;
+
+    // 3D spatial audio
+    void SetVoice3DPosition(AudioVoiceId voiceId, const float position[3]) override;
+    void SetVoice3DVelocity(AudioVoiceId voiceId, const float velocity[3]) override;
+    void SetVoice3DDirection(AudioVoiceId voiceId, const float direction[3]) override;
+    void SetListener(const AudioListener& listener) override;
+    void SetDistanceModel(DistanceModel model) override;
+    void SetDopplerFactor(float factor) override;
+
+    AudioDeviceType GetDeviceType() const override { return AudioDeviceType::SDL3; }
+};
+
+} // namespace Prisma::Audio
+```
+
+Enable the SDL3 backend at configure time:
+
+```bash
+cmake --preset engine-windows-x64-debug -DPRISMA_ENABLE_AUDIO_SDL3=ON
+```
+
+## Native backends
+
+<Tabs>
+  <Tab title="XAudio2 (Windows)">
+    XAudio2 is implemented in `src/engine/audio/AudioDeviceXAudio2.*` and `src/engine/audio/drivers/AudioDriverXAudio2.*`, but it is **currently disabled** in CMakeLists.txt pending an interface refactor. The `PRISMA_ENABLE_AUDIO_XAUDIO2` option exists but has no effect until the refactor is complete.
+
+    <Warning>
+      Do not attempt to enable `PRISMA_ENABLE_AUDIO_XAUDIO2` in production builds. The XAudio2 device implementation is out of sync with the current `IAudioDevice` interface and will fail to link.
+    </Warning>
+  </Tab>
+  <Tab title="AAudio (Android)">
+    AAudio native support is planned for a future release. Until it lands, SDL3 handles audio on Android. Set `PRISMA_USE_NATIVE_AUDIO=OFF` to stay on SDL3 regardless of platform.
+  </Tab>
+  <Tab title="Null device">
+    `AudioDeviceNull` provides a silent implementation of `IAudioDevice`. It is selected automatically when no other backend initializes successfully, ensuring the engine boots without audio hardware.
+  </Tab>
+</Tabs>
+
+## Core types
+
+### AudioClip
+
+`AudioClip` is the engine's unified PCM container. Load audio files through `AssetManager` or decode them manually before constructing a clip.
+
+```cpp
+// From src/engine/audio/AudioTypes.h
+namespace Prisma::Audio {
+
+struct AudioClip {
+    AudioFormat           format;     // sample rate, channels, bits per sample
+    std::vector<uint8_t>  data;       // raw PCM bytes
+    float                 duration;   // seconds
+    std::string           path;       // source path (for debug)
+
+    size_t GetSampleCount() const;
+    size_t GetFrameCount() const;
+    bool   IsValid() const;
+};
+
+} // namespace Prisma::Audio
+```
+
+### PlayDesc
+
+`PlayDesc` controls per-voice playback settings including 3D spatial attributes:
+
+```cpp
+// From src/engine/audio/AudioTypes.h
+struct PlayDesc {
+    float             volume     = 1.0f;   // 0.0 – 1.0
+    float             pitch      = 1.0f;   // 0.5 – 2.0
+    bool              loop       = false;
+    bool              is3D       = false;
+    Audio3DAttributes spatial;             // position, velocity, cone angles
+
+    float             startTime  = 0.0f;   // seconds
+    float             endTime    = -1.0f;  // -1 = play to end
+    uint8_t           priority   = 128;    // 0 = highest
+};
+```
+
+### IAudioDevice interface
+
+All backends implement `IAudioDevice`. The key methods are:
+
+```cpp
+// From src/engine/audio/IAudioDevice.h
+namespace Prisma::Audio {
+
+class IAudioDevice {
+public:
+    virtual bool         Initialize(const AudioDesc& desc) = 0;
+    virtual void         Shutdown() = 0;
+    virtual void         Update(Prisma::Timestep ts) = 0;
+
+    virtual AudioVoiceId Play(const AudioClip& clip, const PlayDesc& desc = {}) = 0;
+    virtual void         Stop(AudioVoiceId voiceId) = 0;
+    virtual void         Pause(AudioVoiceId voiceId) = 0;
+    virtual void         Resume(AudioVoiceId voiceId) = 0;
+    virtual void         StopAll() = 0;
+
+    virtual void         SetVolume(AudioVoiceId voiceId, float volume) = 0;
+    virtual void         SetPitch(AudioVoiceId voiceId, float pitch) = 0;
+    virtual void         SetMasterVolume(float volume) = 0;
+    virtual float        GetMasterVolume() const = 0;
+
+    virtual void         SetListener(const AudioListener& listener) = 0;
+    virtual void         SetDistanceModel(DistanceModel model) = 0;
+
+    virtual bool         IsPlaying(AudioVoiceId voiceId) = 0;
+    virtual VoiceState   GetVoiceState(AudioVoiceId voiceId) = 0;
+    virtual AudioStats   GetStats() const = 0;
+};
+
+} // namespace Prisma::Audio
+```
+
+## 3D spatial audio
+
+The audio system models sound in 3D space using a listener-source model. Update the listener position every frame from your camera transform, then set per-voice 3D attributes before or after `Play`.
+
+```cpp
+// Update the listener to follow the camera
+AudioListener listener;
+listener.position[0] = camPos.x;
+listener.position[1] = camPos.y;
+listener.position[2] = camPos.z;
+// forward and up vectors from camera
+audioDevice->SetListener(listener);
+
+// Play an explosion at a world-space position
+PlayDesc desc;
+desc.is3D = true;
+desc.spatial.position[0] = 10.0f;
+desc.spatial.position[1] = 0.0f;
+desc.spatial.position[2] = -5.0f;
+desc.spatial.maxDistance = 50.0f;
+desc.spatial.rolloffFactor = 1.5f;
+
+AudioVoiceId voice = audioDevice->Play(explosionClip, desc);
+```
+
+Distance attenuation models available via `DistanceModel`:
+
+| Model | Description |
+|-------|-------------|
+| `None` | No distance attenuation |
+| `Inverse` / `InverseClamped` | Inverse-square falloff (default: `InverseClamped`) |
+| `Linear` / `LinearClamped` | Linear falloff between min and max distance |
+| `Exponential` / `ExponentialClamped` | Exponential falloff |
+
+## Usage example
+
+```cpp
+#include "audio/AudioDevice.h"
+#include "audio/AudioTypes.h"
+
+// Initialize with SDL3 backend
+Prisma::Audio::AudioDesc desc;
+desc.deviceType = Prisma::Audio::AudioDeviceType::SDL3;
+desc.maxVoices  = 128;
+
+auto device = std::make_unique<Prisma::Audio::AudioDeviceSDL3>();
+device->Initialize(desc);
+
+// Load clip (raw PCM assumed already decoded)
+Prisma::Audio::AudioClip bgm = LoadOgg("assets/audio/bgm.ogg");
+
+// Play looping background music
+Prisma::Audio::PlayDesc bgmDesc;
+bgmDesc.loop   = true;
+bgmDesc.volume = 0.8f;
+Prisma::Audio::AudioVoiceId bgmVoice = device->Play(bgm, bgmDesc);
+
+// Game loop
+while (running) {
+    device->Update(timestep);
+}
+
+device->Shutdown();
+```
+
+## CMake configuration
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `PRISMA_ENABLE_AUDIO_SDL3` | `ON` | Enable the SDL3 audio backend |
+| `PRISMA_ENABLE_AUDIO_XAUDIO2` | `ON` (Windows) | Enable XAudio2 — currently disabled pending refactor |
+| `PRISMA_USE_NATIVE_AUDIO` | `ON` | Prefer platform-native backend over SDL3 |
+
+Set `PRISMA_USE_NATIVE_AUDIO=OFF` to force SDL3 on all platforms:
+
+```bash
+cmake --preset engine-windows-x64-debug -DPRISMA_USE_NATIVE_AUDIO=OFF
+```

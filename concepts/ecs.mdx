@@ -1,0 +1,276 @@
+---
+title: "Entity Component System in Prisma Engine"
+description: "Prisma Engine uses an ECS architecture for game object management. Learn how to create entities, attach components, and implement systems."
+---
+
+Prisma Engine organizes all game objects using an Entity Component System. Instead of inheriting from a monolithic `GameObject` base class, you compose behavior by attaching lightweight data components to entities and writing systems that operate on those components every frame. This keeps game logic decoupled, cache-friendly, and straightforward to extend.
+
+<Note>
+  The ECS implementation is currently at approximately 80% completion. The core types — `World`, `ISystem`, `EntityID`, and `Component` — are stable and used in production. Component pools and advanced queries are still being finalized.
+</Note>
+
+## Core types
+
+| Type | Defined in | Purpose |
+|---|---|---|
+| `EntityID` | `engine/core/ECS.h` | A `uint32_t` handle that identifies an entity. `INVALID_ENTITY` (0) is the null value. |
+| `World` | `engine/core/ECS.h` | Singleton that owns all systems and drives per-frame updates. |
+| `ISystem` | `engine/core/ECS.h` | Abstract base every system must inherit from. |
+| `Component` | `engine/core/Component.h` | Base class for all attachable data components. |
+
+All ECS types live in the `Prisma::Core::ECS` namespace:
+
+```cpp
+using namespace Prisma::Core::ECS;
+```
+
+## Entities
+
+An entity is just an integer ID. You do not construct or destroy a class instance — you ask the `World` to allocate an ID and then attach components to it.
+
+```cpp
+// EntityID is a uint32_t alias
+using EntityID = uint32_t;
+const EntityID INVALID_ENTITY = 0;
+```
+
+## Components
+
+`Component` is the base class for all data attached to an entity. Override the lifecycle hooks you need:
+
+```cpp
+// engine/core/Component.h
+class ENGINE_API Component {
+public:
+    virtual ~Component() = default;
+    virtual void Initialize() {}
+    virtual void Update(Timestep ts) {}
+    virtual void Shutdown() {}
+
+    // Returns nullptr for non-serializable components
+    virtual const char* GetComponentTypeName() const { return nullptr; }
+
+    void SetOwner(GameObject* gameObject);
+    [[nodiscard]] GameObject* GetOwner() const;
+
+protected:
+    GameObject* owner = nullptr;
+};
+```
+
+### Built-in component types
+
+Prisma Engine ships several ready-to-use components:
+
+<AccordionGroup>
+  <Accordion title="ScriptComponent">
+    Attaches C# scripting logic to an entity. Inherits from `Component`. The scripting system (Mono/CoreCLR) is not yet fully implemented.
+
+    ```cpp
+    // engine/serialization/ScriptComponent.h
+    class ScriptComponent : public Component {};
+    ```
+  </Accordion>
+  <Accordion title="ButtonComponent">
+    A 2D UI button with hover, pressed, and normal states. Inherits from `UIComponent`.
+
+    ```cpp
+    // engine/ui/2d/ButtonComponent.h
+    class ButtonComponent : public UIComponent {
+    public:
+        void SetText(const std::string& text);
+        const std::string& GetText() const;
+
+        void SetNormalColor(const PrismaMath::vec4& color);
+        void SetHoverColor(const PrismaMath::vec4& color);
+        void SetPressedColor(const PrismaMath::vec4& color);
+
+        void OnHoverEnter();
+        void OnHoverLeave();
+        void OnPressed();
+        void OnReleased();
+    };
+    ```
+  </Accordion>
+  <Accordion title="CanvasComponent">
+    A 2D UI container that groups child `UIComponent` instances and controls how they render.
+
+    ```cpp
+    // engine/ui/2d/CanvasComponent.h
+    enum class CanvasRenderMode {
+        ScreenSpace,        // Flat 2D UI overlay
+        ScreenSpaceCamera,  // Perspective-aware 2D
+        WorldSpace,         // 3D world-space UI (not yet implemented)
+    };
+
+    class CanvasComponent : public UIComponent {
+    public:
+        void SetRenderMode(CanvasRenderMode mode);
+        CanvasRenderMode GetRenderMode() const;
+
+        void AddChild(UIComponent* child);
+        void RemoveChild(UIComponent* child);
+        const std::vector<UIComponent*>& GetChildren() const;
+    };
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Systems
+
+Every system inherits from `ISystem` and implements at minimum the `Update` method:
+
+```cpp
+// engine/core/ECS.h
+class ISystem {
+public:
+    virtual ~ISystem() = default;
+    virtual void Initialize() {}
+    virtual void Update(Prisma::Timestep ts) = 0;
+    virtual void Shutdown() {}
+    bool enabled = true;
+
+protected:
+    World* m_world = nullptr;
+};
+```
+
+`Initialize()` is called once when the system is added to the `World`. `Update()` is called every frame, receiving a `Timestep` that wraps the frame delta time. Set `enabled = false` to pause a system without removing it.
+
+### Writing a custom system
+
+```cpp
+#include "core/ECS.h"
+
+using namespace Prisma::Core::ECS;
+
+class PlayerMovementSystem : public ISystem {
+public:
+    void Initialize() override {
+        // One-time setup: cache references, load config, etc.
+    }
+
+    void Update(Prisma::Timestep ts) override {
+        // ts.GetDeltaTime() gives seconds since last frame.
+        // Query components on m_world and update entity state.
+    }
+
+    void Shutdown() override {
+        // Clean up resources acquired during Initialize().
+    }
+};
+```
+
+### Built-in systems
+
+The engine provides a set of systems in `engine/core/Systems.h`:
+
+| System | `TYPE_ID` | Responsibility |
+|---|---|---|
+| `TransformSystem` | 6 | Maintains parent-child hierarchy and world matrix cache |
+| `RenderSystem` | 1 | Collects renderable entities and submits opaque/transparent queues |
+| `PhysicsSystem` | 2 | Fixed-timestep simulation with gravity and collision resolution |
+| `AnimationSystem` | 3 | Drives `AnimationComponent` state machines each frame |
+| `AudioSystem` | 4 | Syncs `AudioSourceComponent` 3D positions with the audio backend |
+| `ScriptSystem` | 5 | Calls into the Mono/CoreCLR scripting runtime |
+| `LightSystem` | 7 | Collects active lights and manages ambient light |
+| `CameraSystem` | 8 | Computes view and projection matrices for the active camera |
+
+The `TransformSystem` is particularly important. Call `TransformSystem::SetParent(child, parent)` to build scene hierarchies; the system propagates dirty flags and recalculates world matrices efficiently each frame:
+
+```cpp
+// engine/core/Systems.h
+class TransformSystem : public ISystem {
+public:
+    void SetParent(EntityID entity, EntityID parent);
+    std::vector<EntityID> GetChildren(EntityID entity);
+    DirectX::XMMATRIX GetWorldMatrix(EntityID entity);
+    // ...
+};
+```
+
+## The World singleton
+
+`World` is a singleton that owns the system list and drives the per-frame update loop.
+
+### Accessing the World
+
+```cpp
+Prisma::Core::ECS::World& world = Prisma::Core::ECS::World::Get();
+```
+
+You can also access it through the `Engine` instance, which is the recommended approach from within application code:
+
+```cpp
+Prisma::Core::ECS::World& world = Prisma::Engine::Get().GetWorld();
+```
+
+### Adding systems
+
+Use `World::AddSystem<T>()` to register a system. The method constructs the system, injects the `World` pointer into `m_world`, and calls `Initialize()`:
+
+```cpp
+world.AddSystem<TransformSystem>();
+world.AddSystem<RenderSystem>();
+world.AddSystem<PlayerMovementSystem>();
+```
+
+Systems update in the order they were added. Register systems that others depend on first — for example, `TransformSystem` before `RenderSystem`.
+
+### Per-frame update
+
+`World::Update()` iterates the system list and calls `Update(ts)` on every enabled system:
+
+```cpp
+// Called once per frame by the Engine main loop — you do not call this directly.
+void World::Update(Prisma::Timestep ts) {
+    for (auto& system : m_systems) {
+        if (system->enabled) {
+            system->Update(ts);
+        }
+    }
+}
+```
+
+### Adding and querying components
+
+```cpp
+// Attach a component to an entity
+ButtonComponent* btn = world.AddComponent<ButtonComponent>(entityId);
+btn->SetText("Play");
+
+// Retrieve a component from an entity
+ButtonComponent* btn = world.GetComponent<ButtonComponent>(entityId);
+if (btn) {
+    btn->SetNormalColor({0.2f, 0.6f, 1.0f, 1.0f});
+}
+```
+
+<Warning>
+  `World::AddComponent` and `World::GetComponent` currently return `nullptr` in the stub implementation while the component pool system is being finalized. Check the source in `engine/core/ECS.h` for the current state before relying on these in production.
+</Warning>
+
+## Putting it together
+
+The following example registers the built-in transform and render systems alongside a custom game system:
+
+```cpp
+#include "app/Engine.h"
+#include "core/ECS.h"
+#include "core/Systems.h"
+
+// Register systems during application initialization
+int MyGame::OnInitialize() {
+    auto& world = Prisma::Engine::Get().GetWorld();
+
+    // Built-in systems — order matters
+    world.AddSystem<Prisma::Core::ECS::TransformSystem>();
+    world.AddSystem<Prisma::Core::ECS::RenderSystem>();
+    world.AddSystem<Prisma::Core::ECS::AudioSystem>();
+
+    // Custom game logic
+    world.AddSystem<PlayerMovementSystem>();
+
+    return 0;
+}
+```

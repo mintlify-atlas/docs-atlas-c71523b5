@@ -1,0 +1,169 @@
+---
+title: "Input handling with SDL3 and native drivers"
+description: "Prisma Engine routes input through SDL3 or platform-native drivers. Handle keyboard, mouse, and gamepad events in your Application subclass."
+---
+
+Prisma Engine routes all player input through a two-layer Driver-Device abstraction. `InputDevice` is the high-level interface your game code talks to; it delegates the actual platform API calls to a pluggable `IInputDriver`. SDL3 is the default cross-platform driver; Win32 (RawInput + XInput) and GameActivity are the native alternatives for Windows and Android respectively.
+
+## Driver-Device pattern
+
+```
+Game layer
+  └── InputDevice   (action bindings, state queries, text input, cursor control)
+        └── IInputDriver  (platform API)
+              ├── InputDriverSDL3     — SDL3 (cross-platform, default)
+              ├── InputDriverWin32    — Win32 RawInput + XInput (Windows native)
+              └── GameActivity input  — Android native (via game-activity library)
+```
+
+`InputDevice::Initialize` selects the driver at startup. Pass `InputDriverType::Auto` to let the engine choose the best driver for the current platform, or specify one explicitly:
+
+```cpp
+Prisma::Input::InputDevice inputDevice;
+inputDevice.Initialize(Prisma::Input::InputDriverType::Auto);
+```
+
+Driver source files live in `src/engine/input/drivers/`.
+
+## Backend drivers
+
+<Tabs>
+  <Tab title="SDL3 (cross-platform)">
+    `InputDriverSDL3` wraps SDL3's unified event queue. It handles keyboard, mouse, and gamepad events on all three supported platforms (Windows, Linux, Android) without any extra configuration.
+
+    Source: `src/engine/input/drivers/InputDriverSDL3.*`
+
+    Enable by setting `PRISMA_USE_NATIVE_INPUT=OFF`, or let `Auto` select SDL3 on Linux:
+
+    ```bash
+    cmake --preset engine-linux-x64-debug -DPRISMA_USE_NATIVE_INPUT=OFF
+    ```
+  </Tab>
+  <Tab title="Win32 (Windows native)">
+    `InputDriverWin32` uses the Windows Raw Input API for keyboard and mouse, and XInput for gamepads. It is selected automatically when `PRISMA_USE_NATIVE_INPUT=ON` (the default) on Windows.
+
+    Source: `src/engine/input/drivers/InputDriverWin32.*`
+
+    <Note>
+    XInput only supports up to four simultaneous gamepads. For broader gamepad support on Windows, switch to the SDL3 driver.
+    </Note>
+  </Tab>
+  <Tab title="GameActivity (Android)">
+    On Android, input events arrive through the GameActivity framework. The engine reads them from the `android_app` struct passed by the Android NDK. Gamepad support uses the GameActivity input buffer.
+
+    The GameActivity driver is selected automatically when targeting Android.
+  </Tab>
+</Tabs>
+
+## Input types
+
+### Keyboard
+
+```cpp
+using namespace Prisma::Input;
+
+// Held state — true every frame the key is down
+if (inputDevice.IsKeyDown(KeyCode::W)) { /* move forward */ }
+
+// Single-frame edge detection
+if (inputDevice.IsKeyJustPressed(KeyCode::Space)) { /* jump */ }
+if (inputDevice.IsKeyJustReleased(KeyCode::Space)) { /* land */ }
+```
+
+`KeyCode` covers the full printable ASCII range plus function keys (F1–F12), arrow keys, modifiers (`LeftShift`, `LeftCtrl`, `LeftAlt`, etc.), and navigation keys (`Escape`, `Tab`, `Backspace`, `Delete`).
+
+### Mouse
+
+```cpp
+int x, y, dx, dy;
+inputDevice.GetMousePosition(x, y);
+inputDevice.GetMouseDelta(dx, dy);
+
+if (inputDevice.IsMouseButtonJustPressed(MouseButton::Left)) { /* fire */ }
+
+int scroll = inputDevice.GetMouseWheelDelta();
+```
+
+Cursor control is available for first-person cameras or UI modes:
+
+```cpp
+inputDevice.SetCursorLocked(true);   // confine and hide cursor
+inputDevice.SetCursorVisible(false);
+```
+
+### Gamepad
+
+```cpp
+if (inputDevice.IsGamepadConnected(0)) {
+    float leftX  = inputDevice.GetGamepadAxis(0, GamepadAxis::LeftX);
+    float leftY  = inputDevice.GetGamepadAxis(0, GamepadAxis::LeftY);
+    float trigger = inputDevice.GetGamepadAxis(0, GamepadAxis::RightTrigger);
+
+    if (inputDevice.IsGamepadButtonDown(0, GamepadButton::South)) { /* jump */ }
+
+    // Rumble feedback: left motor, right motor, duration in ms
+    inputDevice.SetGamepadVibration(0, 0.5f, 0.25f, 200);
+}
+```
+
+### Text input
+
+For UI text fields, enable raw character delivery instead of keycodes:
+
+```cpp
+inputDevice.StartTextInput();
+
+// Later, each frame:
+const std::string& typed = inputDevice.GetTextInput();
+
+inputDevice.StopTextInput();
+```
+
+## Action mappings
+
+`InputDevice` supports named action bindings that decouple game logic from physical keys or buttons. A binding can have a primary key, an alternate key, and a gamepad button — the action fires if any of them is active.
+
+```cpp
+// Register bindings once at startup
+inputDevice.AddActionMapping("Jump",   KeyCode::Space,     KeyCode::Enter);
+inputDevice.AddActionMapping("Attack", KeyCode::LeftCtrl,  KeyCode::Unknown);
+inputDevice.AddActionMapping("Jump",   GamepadButton::South);   // gamepad override
+
+// Poll every frame
+if (inputDevice.IsActionJustPressed("Jump"))  { /* jump */ }
+if (inputDevice.IsActionPressed("Attack"))    { /* hold-to-charge */ }
+```
+
+## InputManager and event flow
+
+`InputManager` is a subsystem owned by the engine core (`src/engine/input/InputManager.*`). It implements `ISubSystem` and receives events dispatched by the engine's main loop:
+
+```cpp
+// Inside the engine event loop
+inputManager.OnEvent(event);   // translates platform events to engine state
+inputManager.Update(timestep); // clears just-pressed / just-released flags
+```
+
+Your `Application` subclass receives the same events via `Application::OnEvent()`. Query the `InputManager` state after `OnEvent` returns:
+
+```cpp
+bool isForward = inputManager.IsKeyPressed(Prisma::Input::KeyCode::W);
+PrismaMath::vec2 mousePos = inputManager.GetMousePosition();
+PrismaMath::vec2 mouseDelta = inputManager.GetMouseDelta();
+```
+
+## CMake configuration
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `PRISMA_USE_NATIVE_INPUT` | `ON` | Use Win32/GameActivity on Windows/Android; SDL3 on Linux |
+
+To force SDL3 input on all platforms:
+
+```bash
+cmake --preset engine-windows-x64-debug -DPRISMA_USE_NATIVE_INPUT=OFF
+```
+
+<Tip>
+SDL3 input is recommended during cross-platform development and testing. Switch to the native driver (`PRISMA_USE_NATIVE_INPUT=ON`) for a production Windows or Android build where you need XInput rumble or GameActivity-specific features.
+</Tip>

@@ -1,0 +1,309 @@
+---
+title: "AssetManager API reference"
+description: "Reference for Prisma::AssetManager — thread-safe asset loading, caching, and lifecycle management for textures, meshes, tilemaps, and cubemap assets."
+---
+
+`AssetManager` is Prisma Engine's central subsystem for loading, caching, and releasing game assets at runtime. It integrates with the engine's `JobSystem` for non-blocking async loads, maintains an internal hash-keyed cache to avoid duplicate disk reads, and searches across configurable root paths to resolve relative asset references. All asset types — `TextureAsset`, `MeshAsset`, `TilemapAsset`, and `CubemapTextureAsset` — are loaded through this single interface.
+
+<Note>
+`AssetManager` must be explicitly initialized with a project root before any load calls. Calling `Load()` on an uninitialized manager crashes intentionally — there is no silent auto-initialization. Call `Initialize(projectRoot)` during engine startup.
+</Note>
+
+## Class declaration
+
+```cpp
+// src/engine/core/AssetManager.h
+namespace Prisma {
+
+class ENGINE_API AssetManager : public ISubSystem {
+public:
+    AssetManager();
+    ~AssetManager() override;
+
+    // ISubSystem interface
+    int Initialize() override;
+    void Shutdown() override;
+    void Update(Timestep ts) override;
+    const char* GetName() const override { return "AssetManager"; }
+
+    // Explicit initialization with project root
+    bool Initialize(const std::filesystem::path& projectRoot);
+
+    void AddSearchPath(const std::filesystem::path& path);
+    std::optional<std::filesystem::path> FindResource(const std::string& relativePath) const;
+
+    template <typename T>
+    AssetHandle<T> GetCachedAsset(Core::StringHash::HashType hash);
+
+    template <typename T, typename... Args>
+    AssetHandle<T> Load(const std::string& relativePath, Args&&... args);
+
+    template <typename T, typename... Args>
+    void LoadAsync(const std::string& relativePath,
+                   std::function<void(AssetHandle<T>)> callback,
+                   Args... args);
+
+    void Unload(const std::string& name);
+    void UnloadAll();
+    bool IsInitialized() const;
+};
+
+} // namespace Prisma
+```
+
+## Initialization
+
+### `Initialize(projectRoot)`
+
+```cpp
+bool Initialize(const std::filesystem::path& projectRoot);
+```
+
+Initializes the manager and sets the primary asset search root. Returns `true` on success. You must call this before any `Load()` or `FindResource()` calls.
+
+<ParamField path="projectRoot" type="std::filesystem::path" required>
+  Absolute path to the project's root directory. Assets are resolved relative to this path.
+</ParamField>
+
+```cpp
+auto& assets = Engine::Get().GetAssetManager();
+assets.Initialize("/path/to/MyGame");
+```
+
+### `AddSearchPath(path)`
+
+```cpp
+void AddSearchPath(const std::filesystem::path& path);
+```
+
+Registers an additional directory to search when resolving relative asset paths. Paths are searched in the order they were added, after the project root.
+
+<ParamField path="path" type="std::filesystem::path" required>
+  Absolute or project-relative path to add to the search list.
+</ParamField>
+
+```cpp
+assets.AddSearchPath("/path/to/shared-assets");
+assets.AddSearchPath("/path/to/mod-content");
+```
+
+## Loading assets
+
+### `Load<T>(relativePath, args...)`
+
+```cpp
+template <typename T, typename... Args>
+AssetHandle<T> Load(const std::string& relativePath, Args&&... args);
+```
+
+Synchronously loads an asset of type `T` from disk and stores it in the cache. If the asset is already cached (matched by hashed path), the cached handle is returned immediately without re-reading from disk.
+
+Returns an empty (invalid) `AssetHandle<T>` if the resource cannot be found or fails to load.
+
+<ParamField path="relativePath" type="std::string" required>
+  Path relative to the project root (or any registered search path). Used as the cache key.
+</ParamField>
+
+<ParamField path="args..." type="Args&&...">
+  Optional constructor arguments forwarded to `T`'s constructor before `Load()` is called.
+</ParamField>
+
+```cpp
+// Load a texture synchronously
+AssetHandle<TextureAsset> tex =
+    assets.Load<TextureAsset>("textures/terrain_diffuse.png");
+
+if (!tex.IsValid()) {
+    // Handle load failure
+}
+
+// Access asset data through the handle
+int width  = tex->GetWidth();
+int height = tex->GetHeight();
+```
+
+<Warning>
+`Load()` runs on the calling thread. Avoid calling it on the render thread for large assets. Use `LoadAsync()` instead.
+</Warning>
+
+### `LoadAsync<T>(relativePath, callback, args...)`
+
+```cpp
+template <typename T, typename... Args>
+void LoadAsync(const std::string& relativePath,
+               std::function<void(AssetHandle<T>)> callback,
+               Args... args);
+```
+
+Submits an asset load job to the engine's `JobSystem`. The callback is invoked with the resulting `AssetHandle<T>` when loading completes (or with an invalid handle on failure). If the asset is already cached, the callback fires immediately on the calling thread without dispatching a job.
+
+<ParamField path="relativePath" type="std::string" required>
+  Relative path used to locate and cache the asset.
+</ParamField>
+
+<ParamField path="callback" type="std::function<void(AssetHandle<T>)>" required>
+  Invoked with the loaded handle. Check `IsValid()` before use — the handle may be empty if loading failed.
+</ParamField>
+
+<ParamField path="args..." type="Args...">
+  Constructor arguments captured by value and forwarded to `T` on the job thread.
+</ParamField>
+
+```cpp
+assets.LoadAsync<MeshAsset>(
+    "meshes/player.obj",
+    [](AssetHandle<MeshAsset> mesh) {
+        if (!mesh.IsValid()) {
+            LOG_ERROR("Game", "Failed to load player mesh");
+            return;
+        }
+        // Safe to use mesh here — job has completed
+        g_playerMesh = mesh;
+    }
+);
+```
+
+<Note>
+The callback is called from a worker thread. Synchronize access to shared state accordingly.
+</Note>
+
+### `GetCachedAsset<T>(hash)`
+
+```cpp
+template <typename T>
+AssetHandle<T> GetCachedAsset(Core::StringHash::HashType hash);
+```
+
+Retrieves an already-loaded asset from the cache by its string hash without triggering a disk read. Returns an invalid handle if the hash is not in the cache.
+
+```cpp
+Core::StringHash hash("textures/terrain_diffuse.png");
+auto tex = assets.GetCachedAsset<TextureAsset>(hash.GetHash());
+```
+
+## Unloading assets
+
+### `Unload(name)`
+
+```cpp
+void Unload(const std::string& name);
+```
+
+Removes the named asset from the cache. The underlying asset data is released when no more `AssetHandle` instances hold a reference to it (reference-counted via `std::shared_ptr`).
+
+<ParamField path="name" type="std::string" required>
+  The relative path string used when the asset was originally loaded.
+</ParamField>
+
+```cpp
+assets.Unload("textures/terrain_diffuse.png");
+```
+
+### `UnloadAll()`
+
+```cpp
+void UnloadAll();
+```
+
+Removes every cached entry. Assets currently held by live `AssetHandle` instances remain valid until those handles go out of scope.
+
+## Path resolution
+
+### `FindResource(relativePath)`
+
+```cpp
+std::optional<std::filesystem::path> FindResource(const std::string& relativePath) const;
+```
+
+Searches all registered paths (project root + any added via `AddSearchPath`) for a file matching `relativePath`. Returns the first absolute path found, or `std::nullopt` if no match exists.
+
+```cpp
+auto fullPath = assets.FindResource("textures/ui/button.png");
+if (fullPath) {
+    // *fullPath is an absolute std::filesystem::path
+}
+```
+
+## AssetHandle
+
+`AssetHandle<T>` is a strongly-typed, reference-counted wrapper over `std::shared_ptr<T>`. It is the return type of all load calls.
+
+```cpp
+// src/engine/core/Asset.h
+template <typename T>
+class AssetHandle {
+public:
+    AssetHandle() = default;
+    AssetHandle(std::shared_ptr<T> asset);
+
+    bool IsValid() const;               // true if non-null
+    T*       operator->();
+    const T* operator->() const;
+    T&       operator*();
+    const T& operator*()  const;
+    std::shared_ptr<T> Get() const;
+
+    bool operator==(const AssetHandle& other) const;
+    bool operator!=(const AssetHandle& other) const;
+};
+```
+
+Always check `IsValid()` before dereferencing a handle returned by `Load()` or `LoadAsync()`.
+
+## Thread safety
+
+<Columns cols={2}>
+  <Card title="Safe across threads" icon="shield-check">
+    `Load()` and `LoadAsync()` are safe to call from multiple threads. The internal cache uses hash-keyed lookup and assets are registered atomically via `RegisterAsset()`.
+  </Card>
+  <Card title="Callback threading" icon="triangle-exclamation">
+    `LoadAsync()` callbacks run on a `JobSystem` worker thread. Use locks or engine-provided synchronization primitives when writing to shared state inside a callback.
+  </Card>
+</Columns>
+
+## Serialization formats
+
+`AssetManager` works with two on-disk formats, both handled transparently by each asset type's `Load()` implementation:
+
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| JSON | `.json` | Human-readable; used for debugging and editor workflows |
+| Binary (Base64 + zstd) | `.bin` | Compact; faster to load for large assets in production |
+| TMX XML | `.tmx` | Tiled map format; parsed via tinyxml2 (tilemaps only) |
+
+```cpp
+// Serialize an asset to JSON
+texture.SerializeToFile("terrain.json", SerializationFormat::JSON);
+
+// Serialize to compact binary
+AssetSerializer::SerializeToFile(texture, "terrain.bin", SerializationFormat::Binary);
+
+// Load back from binary
+auto loaded = AssetSerializer::DeserializeFromFile<TextureAsset>(
+    "terrain.bin", SerializationFormat::Binary);
+```
+
+## Integration with HotReloadManager
+
+During editor builds (`PRISMA_BUILD_EDITOR=ON`), the engine's `HotReloadManager` monitors asset directories for file changes. When a source file is modified, it calls `Unload()` on the affected asset and triggers a fresh `Load()` on the next frame, ensuring the editor viewport reflects the current state of assets on disk without a full engine restart.
+
+<Tip>
+In game builds, hot-reload is disabled. Assets are loaded once and remain cached for the lifetime of the session unless explicitly unloaded.
+</Tip>
+
+## Lifecycle summary
+
+```
+Initialize(projectRoot)
+    │
+    ├─ AddSearchPath(...)   [optional]
+    │
+    ├─ Load<T>(path)        ──► cache hit? return cached handle
+    │                            cache miss? read disk ──► RegisterAsset ──► return handle
+    │
+    ├─ LoadAsync<T>(path, cb)   ──► submits to JobSystem ──► cb(handle)
+    │
+    ├─ Unload(name)         ──► remove from cache
+    │
+    └─ Shutdown()           ──► UnloadAll()
+```

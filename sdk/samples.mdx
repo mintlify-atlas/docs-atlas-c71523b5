@@ -1,0 +1,295 @@
+---
+title: "Prisma Engine SDK sample projects"
+description: "Explore Prisma Engine sample projects including BasicTriangle, BlockGame, and PrismaCraftStarter to learn engine patterns and game development workflows."
+---
+
+The SDK ships three sample projects inside `sdk/samples/`. Each sample is a self-contained CMake project that demonstrates a different level of engine integration — from a minimal render loop all the way to a feature-complete voxel game starter. You can build and run them directly against a local engine build or a prebuilt SDK, and you can copy any sample as a starting point for your own game.
+
+## Sample overview
+
+<CardGroup cols={3}>
+  <Card title="BasicTriangle" icon="triangle">
+    Minimal runnable app. Covers window creation, platform initialization, and a frame loop with `BeginFrame` / `EndFrame` / `Present`.
+  </Card>
+  <Card title="BlockGame" icon="cube">
+    Game logic patterns. Covers input handling, simple world generation, player movement, AABB collision detection, and block placement.
+  </Card>
+  <Card title="PrismaCraftStarter" icon="mountain">
+    Voxel/craft game starter. Integrates PrismaEngine with the PrismaCraft library for chunk loading, full block registration, terrain generation, and a basic inventory system.
+  </Card>
+</CardGroup>
+
+## BasicTriangle
+
+BasicTriangle is the smallest complete application you can write with PrismaEngine. It creates a window, initializes the render system, and runs a frame loop until the user closes the window. No game logic, no assets — just the engine lifecycle in its most direct form.
+
+### Build commands
+
+<Steps>
+  <Step title="Build against a local engine build">
+    Point `PrismaEngine_DIR` at your engine build output directory.
+
+    ```bash
+    cd sdk/samples/BasicTriangle
+    cmake -B build -DPrismaEngine_DIR=../../../build/linux-x64-debug
+    cmake --build build
+    ./build/BasicTriangle
+    ```
+  </Step>
+  <Step title="Build against a prebuilt SDK">
+    Point `PrismaEngine_DIR` at the root of an extracted SDK archive.
+
+    ```bash
+    cd sdk/samples/BasicTriangle
+    cmake -B build -DPrismaEngine_DIR=/opt/PrismaEngine-SDK
+    cmake --build build
+    ./build/BasicTriangle
+    ```
+  </Step>
+</Steps>
+
+### Full source: main.cpp
+
+The complete source file for BasicTriangle demonstrates the canonical `IApplication<T>` pattern. All three lifecycle methods — `Initialize()`, `Run()`, and `Shutdown()` — must be implemented. The `LOG_INFO` and `LOG_ERROR` macros write to the engine's thread-safe logger.
+
+```cpp
+#include <PrismaEngine/PrismaEngine.h>
+#include <iostream>
+
+using namespace PrismaEngine;
+
+class BasicTriangleApp : public IApplication<BasicTriangleApp> {
+public:
+    bool Initialize() override {
+        LOG_INFO("BasicTriangle", "应用程序初始化");
+
+        // 初始化平台
+        if (!Platform::Initialize()) {
+            LOG_ERROR("BasicTriangle", "平台初始化失败");
+            return false;
+        }
+
+        // 创建窗口
+        WindowProps props("Basic Triangle - PrismaEngine", 1280, 720);
+        m_window = Platform::CreateWindow(props);
+
+        if (!m_window) {
+            LOG_ERROR("BasicTriangle", "窗口创建失败");
+            return false;
+        }
+
+        LOG_INFO("BasicTriangle", "初始化完成");
+        return true;
+    }
+
+    int Run() override {
+        LOG_INFO("BasicTriangle", "开始运行");
+
+        auto renderSystem = Graphic::RenderSystem::GetInstance();
+
+        if (!renderSystem->Initialize()) {
+            LOG_ERROR("BasicTriangle", "渲染系统初始化失败");
+            return 1;
+        }
+
+        bool running = true;
+        SetRunning(true);
+
+        while (IsRunning()) {
+            Platform::PumpEvents();
+
+            if (Platform::ShouldClose(m_window)) {
+                SetRunning(false);
+                break;
+            }
+
+            // 渲染一帧
+            renderSystem->BeginFrame();
+
+            // TODO: 在这里添加渲染代码
+
+            renderSystem->EndFrame();
+            renderSystem->Present();
+        }
+
+        LOG_INFO("BasicTriangle", "运行结束");
+        return 0;
+    }
+
+    void Shutdown() override {
+        LOG_INFO("BasicTriangle", "应用程序关闭");
+
+        if (m_window) {
+            Platform::DestroyWindow(m_window);
+        }
+
+        Platform::Shutdown();
+    }
+
+private:
+    WindowHandle m_window = nullptr;
+};
+
+int main(int argc, char* argv[]) {
+    // 初始化日志
+    Logger::GetInstance().Initialize();
+
+    LOG_INFO("Main", "BasicTriangle 示例程序");
+    LOG_INFO("Main", "PrismaEngine 版本: {}",
+             CommandLineParser::GetVersion());
+
+    // 创建并运行应用
+    BasicTriangleApp app;
+    if (!app.Initialize()) {
+        LOG_FATAL("Main", "应用初始化失败");
+        return 1;
+    }
+
+    int exitCode = app.Run();
+    app.Shutdown();
+
+    return exitCode;
+}
+```
+
+<Note>
+  `IApplication<T>` uses CRTP (Curiously Recurring Template Pattern). Your concrete class is the template argument. `SetRunning(bool)` and `IsRunning()` are inherited from the base class and control the main loop state.
+</Note>
+
+## BlockGame
+
+BlockGame demonstrates how to build game logic on top of PrismaEngine. It covers the patterns you need for any action game: a fixed-timestep game loop, keyboard and mouse input, a simple voxel world, player physics with AABB collision detection, and block placement and destruction.
+
+### What it covers
+
+| Feature | Description |
+|---|---|
+| Game loop | Fixed-timestep update loop with delta time |
+| Input handling | Keyboard (WASD, Space, Shift, 1–9, ESC) and mouse (left/right click) |
+| World generation | Procedural world with simple noise |
+| Player movement | Movement, jumping, crouching, and acceleration |
+| Collision detection | AABB-based collision against block geometry |
+| Block interaction | Place and destroy blocks, select block types |
+| Rendering | 3D scene rendering using PrismaEngine's render system |
+
+### Code structure
+
+```
+BlockGame/src/
+├── main.cpp      # Entry point
+├── Game.cpp      # Main game loop
+├── Player.cpp    # Player controller
+└── World.cpp     # World management
+```
+
+### Build commands
+
+```bash
+mkdir build && cd build
+cmake .. -DPrismaEngine_DIR=/path/to/sdk
+cmake --build .
+```
+
+Run on Linux:
+
+```bash
+./BlockGame
+```
+
+Run on Windows:
+
+```bash
+BlockGame.exe
+```
+
+BlockGame links against both `PrismaEngine::Engine` and `PrismaCraft::PrismaCraft`. Make sure `PrismaCraft_DIR` is also set if you are building against a local PrismaCraft installation.
+
+### Controls
+
+| Key / Button | Action |
+|---|---|
+| W / A / S / D | Move |
+| Space | Jump |
+| Shift | Crouch / accelerate |
+| Mouse left | Destroy block |
+| Mouse right | Place block |
+| 1–9 | Select block type |
+| ESC | Quit |
+
+## PrismaCraftStarter
+
+PrismaCraftStarter is a full voxel game starter that combines PrismaEngine with the PrismaCraft library. It targets developers who want a Minecraft-style foundation with chunk loading, a complete block registry, terrain generation, and a basic inventory — ready to extend without building those systems from scratch.
+
+### How it differs from BlockGame
+
+| Feature | BlockGame | PrismaCraftStarter |
+|---|---|---|
+| Game engine | PrismaEngine only | PrismaEngine + PrismaCraft |
+| Block system | Simple custom implementation | Full Minecraft block registry (50+ blocks) |
+| World generation | Simple noise | Minecraft-style terrain, caves, structures |
+| Chunk system | None | Full chunk loading and unloading |
+| Entity system | Simple player | Full entity system |
+| Inventory | None | Basic inventory system |
+| Lighting | None | Simplified lighting system |
+
+### Build commands
+
+```bash
+mkdir build && cd build
+cmake .. -DPrismaEngine_DIR=/path/to/prismaengine-sdk \
+         -DPrismaCraft_DIR=/path/to/prismacraft
+cmake --build .
+./PrismaCraftStarter
+```
+
+### Project structure
+
+```
+PrismaCraftStarter/
+├── src/
+│   ├── main.cpp              # Entry point
+│   └── MinecraftGame.cpp     # Minecraft-style game logic
+└── assets/
+    ├── shaders/              # Shader programs
+    ├── textures/             # Texture atlas
+    └── configs/              # Configuration files
+```
+
+## Using samples as project templates
+
+Each sample is a self-contained CMake project. To use one as a starting point for your own game:
+
+<Steps>
+  <Step title="Copy the sample directory">
+    Copy the sample you want to use into a new directory outside the SDK.
+
+    ```bash
+    cp -r /path/to/sdk/samples/BasicTriangle ~/MyNewGame
+    cd ~/MyNewGame
+    ```
+  </Step>
+  <Step title="Update the project name">
+    Open `CMakeLists.txt` and replace the `project()` name and `add_executable` target name with your game's name.
+
+    ```cmake
+    project(MyNewGame VERSION 1.0.0 LANGUAGES CXX)
+    # ...
+    add_executable(MyNewGame src/main.cpp)
+    ```
+  </Step>
+  <Step title="Point CMake at your SDK">
+    Configure with `PrismaEngine_DIR` set to your SDK location.
+
+    ```bash
+    cmake -B build -DPrismaEngine_DIR=/path/to/sdk
+    cmake --build build
+    ```
+  </Step>
+  <Step title="Rename the application class">
+    In `src/main.cpp`, rename the `IApplication<T>` subclass and update the template argument to match your new class name, then start adding your game logic.
+  </Step>
+</Steps>
+
+<Tip>
+  Start with BasicTriangle if you are new to PrismaEngine — it has the smallest surface area and makes the `IApplication<T>` lifecycle easy to follow. Move to BlockGame once you need input handling and world state, or jump straight to PrismaCraftStarter if your target genre is voxel / sandbox.
+</Tip>

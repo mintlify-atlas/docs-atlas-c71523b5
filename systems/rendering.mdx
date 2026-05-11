@@ -1,0 +1,300 @@
+---
+title: "Rendering system: Vulkan and DirectX 12 pipelines"
+description: "Prisma Engine's rendering system supports Vulkan and DirectX 12 backends with forward and deferred pipelines, RenderGraph, and shader management."
+---
+
+Prisma Engine's rendering system is a modern, modular graphics layer built for C++20. It abstracts over Vulkan and DirectX 12 through a shared `IRenderBackend` interface, providing forward and deferred pipelines, a high-level `Renderer` submission API, and an in-progress `RenderGraph` for automatic resource dependency management and barrier optimization.
+
+## Backend architecture
+
+The rendering stack is organized in four layers:
+
+```
+RenderSystem
+├── RenderBackend (IRenderBackend abstraction)
+│   ├── DirectX 12 adapter  — Windows primary backend
+│   ├── Vulkan adapter      — Windows, Linux, Android
+│   └── [Future: Metal]     — macOS / iOS
+├── IResourceFactory
+│   ├── DX12ResourceFactory
+│   └── VulkanResourceFactory
+├── Render Pipelines
+│   ├── Forward Pipeline
+│   └── Deferred Pipeline
+└── RenderGraph (in progress)
+```
+
+<Tabs>
+  <Tab title="Vulkan">
+    The Vulkan backend runs on Windows, Linux, and Android. Shaders are loaded as SPIR-V binaries compiled from GLSL source via `glslangValidator`. RenderDoc integration is available for frame capture and debugging.
+
+    Sources: `src/engine/graphic/adapters/vulkan/`
+  </Tab>
+  <Tab title="DirectX 12">
+    The DX12 backend is the primary renderer on Windows. It uses Enhanced Barriers and integrates with PIX for GPU debugging. Shaders are authored in HLSL and compiled to DXIL bytecode with `fxc` or `dxc`.
+
+    Sources: `src/engine/graphic/adapters/dx12/`
+  </Tab>
+</Tabs>
+
+## Render pipelines
+
+<Tabs>
+  <Tab title="Forward pipeline">
+    The forward pipeline renders geometry in a single pass per light, keeping memory bandwidth low and making it well-suited for scenes with few light sources or transparent geometry.
+
+    Passes (in order):
+
+    | Pass | File | Purpose |
+    |------|------|---------|
+    | `DepthPrePass` | `pipelines/forward/DepthPrePass.*` | Fill the depth buffer before shading |
+    | `OpaquePass` | `pipelines/forward/OpaquePass.*` | Shade fully opaque geometry |
+    | `TransparentPass` | `pipelines/forward/TransparentPass.*` | Alpha-blended geometry, back-to-front sorted |
+  </Tab>
+  <Tab title="Deferred pipeline">
+    The deferred pipeline separates geometry from lighting. A G-Buffer accumulates surface attributes, and a separate composition pass evaluates all lights in screen space.
+
+    Passes (in order):
+
+    | Pass | File | Purpose |
+    |------|------|---------|
+    | `GeometryPass` | `pipelines/deferred/GeometryPass.*` | Write albedo, normals, and depth to G-Buffer |
+    | `CompositionPass` | `pipelines/deferred/CompositionPass.*` | Evaluate lights and compose final image |
+  </Tab>
+</Tabs>
+
+## RenderSystem lifecycle
+
+`RenderSystem` is the top-level manager. Initialize it once at startup, then drive the frame loop with the methods below.
+
+```cpp
+namespace PrismaEngine {
+namespace Graphic {
+
+class RenderSystem {
+public:
+    // Initialize rendering system
+    bool Initialize(Platform* platform, RenderAPI api,
+                   WindowHandle window, void* surface,
+                   uint32_t width, uint32_t height);
+
+    // Frame control
+    void BeginFrame();
+    void EndFrame();
+    void Present();
+    void Resize(uint32_t width, uint32_t height);
+
+    // Access the active backend
+    IRenderBackend* GetBackend() const;
+};
+
+} // namespace Graphic
+} // namespace PrismaEngine
+```
+
+A typical game loop looks like this:
+
+```cpp
+auto renderSystem = Graphic::RenderSystem::GetInstance();
+renderSystem->Initialize(platform.get(), Graphic::RenderAPI::Vulkan,
+                         window, nullptr, 1920, 1080);
+
+while (running) {
+    renderSystem->BeginFrame();
+
+    // Submit draw commands via Renderer (see below)
+    Graphic::Renderer::BeginScene(cameraData);
+    Graphic::Renderer::Submit(mesh, material, transform);
+    Graphic::Renderer::EndScene();
+
+    renderSystem->EndFrame();
+    renderSystem->Present();
+}
+```
+
+## High-level Renderer API
+
+`Renderer` is a lightweight static submission front-end. It accumulates `RenderCommand` entries into a queue that the active pipeline consumes during `EndScene`.
+
+```cpp
+// From src/engine/graphic/Renderer.h
+namespace Prisma::Graphic {
+
+struct RenderCommand {
+    Mesh*               mesh;
+    Material*           material;
+    PrismaMath::mat4    transform;
+    BoundingBox         boundingBox;
+    Prisma::Color       color;
+};
+
+class ENGINE_API Renderer {
+public:
+    static void BeginScene(const CameraData& camera);
+    static void EndScene();
+
+    static void Submit(Mesh* mesh, Material* material,
+                       const PrismaMath::mat4& transform,
+                       const Prisma::Color& color = Prisma::Color(1.0f, 1.0f, 1.0f, 1.0f));
+
+    static const std::vector<RenderCommand>& GetCommandQueue();
+    static const SceneData& GetSceneData();
+    static void ClearQueue();
+};
+
+} // namespace Prisma::Graphic
+```
+
+## Shader management
+
+Prisma Engine maintains separate shader trees for each backend.
+
+<Tabs>
+  <Tab title="HLSL (DirectX 12)">
+    ```
+    resources/common/shaders/hlsl/
+    ├── default.hlsl    # Default mesh shader
+    ├── Skybox.hlsl     # Skybox rendering
+    └── Text.hlsl       # Text rendering
+    ```
+
+    Compile with `fxc` or `dxc` to produce DXIL bytecode. Use `dxc` for shader model 6.x features such as wave intrinsics.
+  </Tab>
+  <Tab title="GLSL (Vulkan)">
+    ```
+    resources/common/shaders/glsl/
+    ├── clearcolor.vert / .frag   # Clear color pass
+    ├── shader.vert    / .frag    # Standard mesh
+    └── skybox.vert    / .frag    # Skybox
+    ```
+
+    Compile with `glslangValidator` to SPIR-V. On Android, the Gradle plugin compiles GLSL automatically during the build; outputs land in `build/intermediates/shader_assets/**/*.spv`.
+  </Tab>
+</Tabs>
+
+**Shader compilation matrix**
+
+| Platform | Compiler | Output |
+|----------|----------|--------|
+| Windows (DX12) | `fxc` / `dxc` | DXIL bytecode |
+| Windows (Vulkan) | `glslangValidator` | SPIR-V |
+| Linux | `glslangValidator` | SPIR-V |
+| Android | Android Gradle Plugin | SPIR-V (automatic) |
+
+## RenderGraph (in progress)
+
+The engine is migrating from `ScriptableRenderPipeline` to a `RenderGraph` architecture. `RenderGraph` tracks resource reads and writes per pass, resolves barrier placement automatically, and enables parallel pass execution.
+
+```cpp
+// From src/engine/graphic/RenderGraph.h
+namespace Prisma::Graphic {
+
+class ENGINE_API RenderGraph {
+public:
+    RenderGraph(IRenderDevice* device);
+
+    // Add a typed pass with setup and execute lambdas
+    template<typename PassData, typename SetupFunc, typename ExecuteFunc>
+    void AddPass(const std::string& name, SetupFunc&& setup, ExecuteFunc&& execute);
+
+    void Compile();
+    void Execute(RenderCommandContext* cmd);
+};
+
+} // namespace Prisma::Graphic
+```
+
+Usage example:
+
+```cpp
+RenderGraph graph(device);
+
+struct GBufferData {
+    RGResourceHandle color;
+    RGResourceHandle depth;
+};
+
+graph.AddPass<GBufferData>("GBuffer",
+    [&](RGBuilder& builder, GBufferData& data) {
+        data.color = builder.CreateTexture(
+            RGResourceDesc::Texture2D(1920, 1080, RGResourceDesc::Format::RGBA8), "GBufferColor");
+        data.depth = builder.CreateTexture(
+            RGResourceDesc::Texture2D(1920, 1080, RGResourceDesc::Format::D32F), "Depth");
+        builder.Write(data.color);
+        builder.Write(data.depth);
+    },
+    [](const GBufferData& data, RGContext& ctx) {
+        // Record geometry draw calls via ctx.GetCmd()
+    });
+
+graph.Compile();
+graph.Execute(commandContext);
+```
+
+<Note>
+RenderGraph is under active development. The `RGBuilder::Read` / `Write` dependency tracking is implemented; automatic barrier insertion and aliasing are planned. Refer to `docs/RenderGraph_Migration_Plan.md` in the repository for the full migration schedule.
+</Note>
+
+## Material and mesh descriptors
+
+```cpp
+// From src/engine/graphic/RenderDesc.h
+namespace PrismaEngine::Graphic {
+
+struct MeshDesc {
+    const Vertex*   vertices;
+    size_t          vertexCount;
+    const uint32_t* indices;
+    size_t          indexCount;
+};
+
+struct MaterialDesc {
+    glm::vec4                        albedo;
+    float                            metallic;
+    float                            roughness;
+    float                            ao;
+    std::shared_ptr<TextureAsset>    albedoMap;
+    std::shared_ptr<TextureAsset>    normalMap;
+};
+
+} // namespace PrismaEngine::Graphic
+```
+
+`Material` exposes a higher-level mutating API and supports JSON round-trip serialization via `nlohmann::json`.
+
+## Key classes
+
+<CardGroup cols={2}>
+  <Card title="RenderSystem" icon="cpu">
+    Top-level lifecycle manager. Owns the active backend and drives `BeginFrame` / `EndFrame` / `Present`.
+  </Card>
+  <Card title="Renderer" icon="layers">
+    Static submission API. Collects `RenderCommand` entries and hands them to the active pipeline.
+  </Card>
+  <Card title="RenderGraph" icon="network">
+    Declarative pass graph with typed `PassData`, `RGBuilder` setup, and automatic dependency resolution.
+  </Card>
+  <Card title="IRenderBackend / IResourceFactory" icon="plug">
+    Abstraction boundary. Vulkan and DX12 adapters implement these interfaces independently.
+  </Card>
+  <Card title="Material" icon="palette">
+    PBR material with albedo, metallic, roughness, and texture map slots. Serializable to JSON.
+  </Card>
+  <Card title="Camera" icon="camera">
+    Provides `GetViewMatrix()`, `GetProjectionMatrix()`, and `GetViewProjectionMatrix()` for the scene.
+  </Card>
+</CardGroup>
+
+## Platform-specific notes
+
+<AccordionGroup>
+  <Accordion title="Windows">
+    The primary backend is DirectX 12. Vulkan is available as an opt-in by passing `RenderAPI::Vulkan` to `RenderSystem::Initialize`. Entry point: `src/runtime/windows/WindowsRuntime.cpp`.
+  </Accordion>
+  <Accordion title="Linux">
+    Vulkan is the only supported backend. The Linux CMake presets are defined but not fully validated; community testing is welcome. Entry point: `src/runtime/linux/LinuxRuntime.cpp`.
+  </Accordion>
+  <Accordion title="Android">
+    Vulkan is the primary backend. GLSL shaders are compiled to SPIR-V automatically by the Android Gradle Plugin. Assets are loaded via `AAssetManager`. Entry point: `src/runtime/android/AndroidRuntime.cpp`.
+  </Accordion>
+</AccordionGroup>

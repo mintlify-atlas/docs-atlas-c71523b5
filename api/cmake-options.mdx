@@ -1,0 +1,211 @@
+---
+title: "CMake configuration options for Prisma Engine"
+description: "Reference for all PRISMA_* CMake options controlling rendering backends, audio drivers, editor builds, shared libraries, and upscalers across platforms."
+---
+
+Prisma Engine's build system is controlled entirely through CMake cache variables prefixed with `PRISMA_`. These options let you select rendering backends, audio drivers, dependency management strategy, editor inclusion, and optional upscaling technologies. Options are split across several CMake modules: `cmake/DeviceOptions.cmake` for device feature flags and `cmake/UpscalerOptions.cmake` for upscaler support.
+
+<Note>
+The current default branch uses a simplified configuration that forces **SDL3 + Vulkan + ImGui** and locks out DirectX 12, OpenGL, and XAudio2. The tables below reflect both the option names and their effective defaults in this configuration.
+</Note>
+
+## Setting options
+
+Pass options on the CMake configure command line:
+
+```bash
+cmake -B build \
+  -DPRISMA_BUILD_EDITOR=OFF \
+  -DPRISMA_BUILD_SHARED_LIBS=OFF \
+  -DPRISMA_ENABLE_RENDER_VULKAN=ON
+```
+
+Or use the preset system for common configurations:
+
+```bash
+# Editor preset (includes ImGui, Vulkan)
+cmake --preset editor-windows-x64-debug
+
+# Runtime-only preset
+cmake --preset runtime-linux-x64-release
+```
+
+---
+
+## Build configuration
+
+These options control what gets built and how the engine library is packaged.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `PRISMA_BUILD_EDITOR` | `BOOL` | `ON` (Windows only) | Includes the editor application target and ImGui debug panels in the build |
+| `PRISMA_BUILD_SHARED_LIBS` | `BOOL` | `ON` (Debug), `OFF` (Release) | Builds the engine as a shared library (`.dll`/`.so`). Disable for static linking in release or WebAssembly builds |
+| `PRISMA_USE_FETCHCONTENT` | `BOOL` | `ON` | Fetches all third-party dependencies via CMake `FetchContent`. Set to `OFF` to use vcpkg instead |
+| `PRISMA_RUNTIME_DYNAMIC_LOAD` | `BOOL` | `ON` | Enables runtime dynamic loading of engine modules. Must be `OFF` for WebAssembly targets |
+
+### WebAssembly requirements
+
+`PRISMA_BUILD_SHARED_LIBS` and `PRISMA_RUNTIME_DYNAMIC_LOAD` must both be disabled for WebAssembly builds:
+
+```bash
+emcmake cmake -B build/runtime-web-debug \
+  -DPRISMA_BUILD_EDITOR=OFF \
+  -DPRISMA_BUILD_SHARED_LIBS=OFF \
+  -DPRISMA_RUNTIME_DYNAMIC_LOAD=OFF
+cmake --build build/runtime-web-debug --target Runtime
+```
+
+---
+
+## Rendering backends
+
+Options in this group control which graphics API backends are compiled into the engine. Only one backend needs to be active at a time, though multiple can coexist.
+
+| Option | Type | Effective default | Description |
+|--------|------|-------------------|-------------|
+| `PRISMA_ENABLE_RENDER_DX12` | `BOOL` | `OFF` (forced) | Enable the DirectX 12 rendering backend. Windows only. Currently locked off in the default branch |
+| `PRISMA_ENABLE_RENDER_VULKAN` | `BOOL` | `ON` (forced) | Enable the Vulkan rendering backend. Supported on Windows, Linux, and Android |
+| `PRISMA_ENABLE_RENDER_OPENGL` | `BOOL` | `OFF` (forced) | Enable the OpenGL fallback backend. Linux only; currently locked off in the default branch |
+| `PRISMA_DEFAULT_RENDER_BACKEND` | `STRING` | `"Vulkan"` | Sets the backend selected at runtime when multiple are compiled in |
+
+### Conditional compilation
+
+Backend availability is exposed as preprocessor definitions:
+
+```cpp
+#if defined(PRISMA_ENABLE_RENDER_VULKAN)
+    // Vulkan-specific initialization
+    InitVulkanDevice();
+#elif defined(PRISMA_ENABLE_RENDER_DX12)
+    InitDX12Device();
+#endif
+```
+
+<Warning>
+DirectX 12 requires Windows 10 or later and the DirectX-Headers package. Vulkan requires the Vulkan SDK 1.3+. On Android, Vulkan is the only supported backend — do not disable it for Android targets.
+</Warning>
+
+---
+
+## Audio backends
+
+| Option | Type | Effective default | Description |
+|--------|------|-------------------|-------------|
+| `PRISMA_ENABLE_AUDIO_SDL3` | `BOOL` | `ON` (forced) | Enable the SDL3 cross-platform audio backend. Supported on Windows, Linux, and Android |
+| `PRISMA_ENABLE_AUDIO_XAUDIO2` | `BOOL` | `OFF` (forced) | Enable the XAudio2 Windows native audio backend. Currently disabled pending interface refactoring |
+| `PRISMA_USE_NATIVE_AUDIO` | `BOOL` | `ON` | When `ON`, the platform's native audio API is preferred (XAudio2 on Windows, AAudio on Android). Set to `OFF` to force SDL3 audio on all platforms |
+
+<Warning>
+`PRISMA_ENABLE_AUDIO_XAUDIO2` is present in the CMake system but is commented out in the engine `CMakeLists.txt` pending an interface rewrite. Setting it `ON` currently has no effect.
+</Warning>
+
+```cpp
+// Guard XAudio2-specific code
+#if defined(PRISMA_ENABLE_AUDIO_XAUDIO2)
+    // XAudio2 code
+#endif
+
+#if defined(PRISMA_ENABLE_AUDIO_SDL3)
+    // SDL3 audio code
+#endif
+```
+
+---
+
+## Input
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `PRISMA_USE_NATIVE_INPUT` | `BOOL` | `ON` | Uses XInput on Windows and GameActivity input on Android. Set to `OFF` to use SDL3 input on all platforms |
+
+---
+
+## Editor and debug UI
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `PRISMA_ENABLE_IMGUI_DEBUG` | `BOOL` | `ON` (Debug builds) | Compiles ImGui and the engine's debug overlay panels. Automatically enabled for editor presets; typically disabled in release or runtime-only builds |
+
+---
+
+## Platform mode summary
+
+The engine supports two configuration modes:
+
+<Columns cols={2}>
+  <Card title="Native mode (default)" icon="computer">
+    Uses platform-specific APIs for best performance.
+    - **Windows**: DirectX 12, XAudio2, XInput
+    - **Android**: Vulkan, AAudio, GameActivity
+    - **Linux**: OpenGL / Vulkan
+  </Card>
+  <Card title="Cross-platform mode" icon="globe">
+    Uses SDL3 for portable audio and input.
+    - Audio: SDL3 backend on all platforms
+    - Input: SDL3 input on all platforms
+    Enable with `PRISMA_USE_NATIVE_AUDIO=OFF` and `PRISMA_USE_NATIVE_INPUT=OFF`
+  </Card>
+</Columns>
+
+---
+
+## Upscaler options
+
+Upscaler support is configured in `cmake/UpscalerOptions.cmake`. All upscalers are **disabled by default** and require additional SDK setup.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `PRISMA_ENABLE_UPSCALER_FSR` | `BOOL` | `OFF` | Enable AMD FidelityFX Super Resolution (FSR) 2.2. Cross-platform; works with Vulkan and DirectX 12 |
+| `PRISMA_ENABLE_UPSCALER_DLSS` | `BOOL` | `OFF` | Enable NVIDIA Deep Learning Super Sampling (DLSS). Requires NVIDIA GPU and the DLSS SDK; Windows only |
+| `PRISMA_ENABLE_UPSCALER_TSR` | `BOOL` | `OFF` | Enable Temporal Super Resolution (TSR), an Unreal Engine-inspired temporal upscaler. Engine-native implementation |
+
+```bash
+# Enable FSR for a Vulkan release build
+cmake -B build/release \
+  -DPRISMA_ENABLE_RENDER_VULKAN=ON \
+  -DPRISMA_ENABLE_UPSCALER_FSR=ON \
+  -DCMAKE_BUILD_TYPE=Release
+```
+
+<Note>
+DLSS requires the NVIDIA DLSS SDK to be present at configure time. The SDK is not fetched via FetchContent and must be installed separately. See NVIDIA's developer portal for download instructions.
+</Note>
+
+---
+
+## Advanced rendering features
+
+These options enable GPU features beyond the base rendering pipeline. All are off by default.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `PRISMA_ENABLE_RAY_TRACING` | `BOOL` | `OFF` | Enable DirectX Raytracing (DXR) / Vulkan ray tracing extensions |
+| `PRISMA_ENABLE_MESH_SHADERS` | `BOOL` | `OFF` | Enable mesh shader pipeline stage |
+| `PRISMA_ENABLE_VARIABLE_RATE_SHADING` | `BOOL` | `OFF` | Enable Variable Rate Shading (VRS) for performance optimization |
+| `PRISMA_ENABLE_BINDLESS_RESOURCES` | `BOOL` | `OFF` | Enable bindless resource descriptors for large texture arrays |
+
+---
+
+## Dependency management
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `PRISMA_USE_FETCHCONTENT` | `BOOL` | `ON` | Use CMake FetchContent to download and build all third-party dependencies automatically at configure time |
+
+When `PRISMA_USE_FETCHCONTENT=OFF`, dependencies are resolved via vcpkg. Initialize vcpkg before configuring:
+
+```bash
+# Initialize vcpkg
+./vcpkg/bootstrap-vcpkg.sh        # Linux/macOS
+.\vcpkg\bootstrap-vcpkg.bat       # Windows
+
+# Install dependencies
+./vcpkg/vcpkg install
+
+# Configure with vcpkg toolchain
+cmake -B build \
+  -DPRISMA_USE_FETCHCONTENT=OFF \
+  -DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake
+```
+
+All dependency versions are pinned in `cmake/DependencyVersions.cmake`.

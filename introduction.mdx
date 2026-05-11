@@ -1,0 +1,53 @@
+---
+title: "Prisma Engine: High-Performance C++20 Game Engine Overview"
+description: "Prisma Engine is a cross-platform 3D game engine with Vulkan/DirectX 12 rendering, ECS architecture, and SDL3 audio for Windows, Linux, and Android."
+---
+
+Prisma Engine is a cross-platform 3D game engine built with modern C++20, designed for developers who want high-performance rendering and clean architecture without sacrificing portability. These docs cover everything from setting up an SDK-based project to building the engine from source, working with the Entity Component System, integrating audio, and targeting Windows, Linux, and Android platforms.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Vulkan and DirectX 12 rendering" icon="display">
+    Hardware-accelerated GPU rendering with forward and deferred pipelines, HLSL and GLSL shader support, and Vulkan Memory Allocator integration.
+  </Card>
+  <Card title="Entity Component System" icon="sitemap">
+    A high-performance ECS built on `Prisma::Core::ECS::World` with typed component pools, system scheduling, and per-frame timestep updates.
+  </Card>
+  <Card title="SDL3 audio" icon="volume-high">
+    Cross-platform audio via the SDL3 backend with 3D spatial sound support. Pluggable driver interface supports platform-native backends where available.
+  </Card>
+  <Card title="Integrated ImGui editor" icon="screwdriver-wrench">
+    Built-in editor tools for scene inspection, component debugging, and runtime overlays. Enabled automatically on debug builds via `PRISMA_ENABLE_IMGUI_DEBUG`.
+  </Card>
+  <Card title="Cross-platform support" icon="globe">
+    Targets Windows x64, Linux x64/ARM64, and Android arm64-v8a. CMake presets cover all platform and build-type combinations out of the box.
+  </Card>
+  <Card title="Asset management" icon="box-archive">
+    Thread-safe asset loading with JSON and Base64+zstd binary serialization. Supports textures, meshes, tilemaps, and cubemaps via a unified `AssetManager`.
+  </Card>
+</CardGroup>
+
+## Module status
+
+The engine is under active development. The table below shows the current completion level for each core module.
+
+| Module | Status | Completion |
+|---|---|---|
+| ECS Component System | Active | 80% |
+| Vulkan Backend | Active | 90% |
+| Platform Layer | Active | 95% |
+| Logger System | Complete | 100% |
+| Audio System (SDL3) | Active | 50% |
+| Resource Management | Active | 75% |
+| Editor Tools (ImGui) | Early | 30% |
+
+**Overall project completion: ~70%**
+
+<Note>
+  The Windows Vulkan backend is production-ready with a fully integrated ImGui editor. The `prune` branch focuses exclusively on the SDL3 + Vulkan rendering path. DirectX 12, XAudio2, and OpenGL backends are removed on this branch.
+</Note>
+
+## License
+
+Prisma Engine is released under the **MIT License**. You are free to use, modify, and distribute it in personal and commercial projects. See the [LICENSE](https://github.com/Excurs1ons/PrismaEngine/blob/prune/LICENSE) file in the repository for full terms.

@@ -1,0 +1,251 @@
+---
+title: "Prisma::Application API reference"
+description: "API reference for Prisma::Application — the base class for all Prisma Engine games, defining lifecycle hooks and the application specification."
+---
+
+Every Prisma Engine game is an `Application`. You subclass `Prisma::Application`, implement the required lifecycle hooks, and expose a `CreateApplication()` factory function that the engine entry point calls to construct your game. The engine takes ownership of the returned pointer and drives all callbacks from the main loop.
+
+## ApplicationSpecification
+
+Fill in `ApplicationSpecification` before constructing your subclass to configure the initial window and rendering parameters.
+
+```cpp
+#include "app/Application.h"
+
+Prisma::ApplicationSpecification spec;
+spec.Name        = "My Game";
+spec.EntryScene  = "scenes/main.scene";
+spec.Width       = 1920;
+spec.Height      = 1080;
+spec.Fullscreen  = false;
+spec.Resizable   = true;
+spec.PresentMode = Prisma::Graphic::PresentMode::VSync;
+spec.MaxFPS      = 0; // 0 = unlimited
+```
+
+<ResponseField name="Name" type="std::string">
+  Application display name. Appears in the window title bar. Defaults to `"Prisma App"`.
+</ResponseField>
+
+<ResponseField name="EntryScene" type="std::string">
+  Relative path to the scene file loaded at startup. Leave empty to start with no scene. Defaults to `""`.
+</ResponseField>
+
+<ResponseField name="Width" type="uint32_t">
+  Initial window width in pixels. Defaults to `1280`.
+</ResponseField>
+
+<ResponseField name="Height" type="uint32_t">
+  Initial window height in pixels. Defaults to `720`.
+</ResponseField>
+
+<ResponseField name="Fullscreen" type="bool">
+  Start in fullscreen mode. Defaults to `false`.
+</ResponseField>
+
+<ResponseField name="Resizable" type="bool">
+  Allow the window to be resized by the user. Defaults to `true`.
+</ResponseField>
+
+<ResponseField name="PresentMode" type="Prisma::Graphic::PresentMode">
+  Swap-chain presentation mode. Defaults to `PresentMode::VSync`.
+</ResponseField>
+
+<ResponseField name="MaxFPS" type="uint32_t">
+  Frame-rate cap. `0` means uncapped. Defaults to `0`.
+</ResponseField>
+
+## Application class
+
+```cpp
+namespace Prisma {
+
+class ENGINE_API Application {
+public:
+    explicit Application(const ApplicationSpecification& spec = ApplicationSpecification());
+    virtual ~Application();
+
+    static Application& Get();
+
+    // --- Required override ---
+    virtual int  OnInitialize()      = 0;
+
+    // --- Optional overrides ---
+    virtual int  OnImGuiInitialize() { return -1; }
+    virtual void OnShutdown();
+    virtual void OnUpdate(Timestep ts);
+    virtual void OnRender();
+    virtual void OnImGuiRender();
+    virtual void OnEvent(Event& e);
+    virtual bool ShouldCloseOnWindowClose() const { return true; }
+
+    // --- State control ---
+    void Close();
+    bool IsRunning() const;
+
+    // --- Accessors ---
+    const ApplicationSpecification& GetSpecification() const;
+    LayerStack& GetLayerStack();
+    void PushLayer(Layer* layer);
+    void PushOverlay(Layer* overlay);
+};
+
+} // namespace Prisma
+```
+
+## Required override
+
+### OnInitialize
+
+```cpp
+virtual int OnInitialize() = 0;
+```
+
+Called once by the engine after all subsystems are ready and the window is open. Load assets, register ECS systems, set up scenes, and configure your initial state here. Return `0` to signal success. Any non-zero return aborts startup and triggers shutdown.
+
+```cpp
+class MyGame : public Prisma::Application {
+public:
+    int OnInitialize() override {
+        auto& world = Prisma::Engine::Get().GetWorld();
+        world.AddSystem<Prisma::Core::ECS::RenderSystem>();
+        world.AddSystem<Prisma::Core::ECS::PhysicsSystem>();
+        return 0;
+    }
+};
+```
+
+## Optional lifecycle overrides
+
+### OnShutdown
+
+```cpp
+virtual void OnShutdown();
+```
+
+Called once when the engine is shutting down, before subsystem teardown. Release application-owned resources here — open file handles, custom GPU buffers, audio streams.
+
+### OnUpdate
+
+```cpp
+virtual void OnUpdate(Timestep ts);
+```
+
+Called every frame after input processing. `ts` carries the elapsed time since the last frame. Drive game logic, physics queries, and ECS world updates from here.
+
+<ParamField path="ts" type="Prisma::Timestep">
+  Time elapsed since the previous frame. Use `ts.GetSeconds()` or `ts.GetMilliseconds()` to read the delta as a float.
+</ParamField>
+
+### OnRender
+
+```cpp
+virtual void OnRender();
+```
+
+Called every frame after `OnUpdate()`, dedicated to submitting draw commands. Keep rendering code here and update-logic code in `OnUpdate()` to maintain a clean separation.
+
+### OnImGuiRender
+
+```cpp
+virtual void OnImGuiRender();
+```
+
+Called every frame after `OnRender()` when the ImGui debug UI is active (editor and debug builds). Issue ImGui widgets here.
+
+### OnEvent
+
+```cpp
+virtual void OnEvent(Event& e);
+```
+
+Called for every platform event (keyboard, mouse, window resize, window close, etc.) before `OnUpdate()`. Use `EventDispatcher` to handle specific event types.
+
+<ParamField path="e" type="Prisma::Event&">
+  The platform event. Cast to a concrete type with `EventDispatcher` or `event_cast<T>`.
+</ParamField>
+
+### ShouldCloseOnWindowClose
+
+```cpp
+virtual bool ShouldCloseOnWindowClose() const { return true; }
+```
+
+Return `false` to keep the engine running after the window is closed — useful for headless servers or custom shutdown flows. Defaults to `true`.
+
+## State control
+
+```cpp
+void Close();
+bool IsRunning() const;
+```
+
+`Close()` signals the engine to exit the main loop after the current frame completes. `IsRunning()` reflects whether `Close()` has been called yet.
+
+## Layer system
+
+Applications support a `LayerStack` for organizing subsystems or editor panels:
+
+```cpp
+void PushLayer(Layer* layer);
+void PushOverlay(Layer* overlay);
+LayerStack& GetLayerStack();
+```
+
+Layers receive `OnUpdate`, `OnRender`, and `OnEvent` calls in stack order. Overlays are pushed on top and processed last.
+
+## ECSApplication
+
+For ECS-driven games, prefer subclassing `ECSApplication` instead of `Application` directly. It embeds a `Core::ECS::World` and overrides `OnUpdate()` to drive all registered systems automatically.
+
+```cpp
+#include "app/ECSApplication.h"
+
+namespace Prisma {
+
+class ENGINE_API ECSApplication : public Application {
+public:
+    explicit ECSApplication(const ApplicationSpecification& spec = ApplicationSpecification());
+
+    Core::ECS::World& GetWorld();
+    void OnUpdate(Timestep ts) override; // calls World::Update(ts)
+
+protected:
+    Core::ECS::World m_World;
+};
+
+} // namespace Prisma
+```
+
+```cpp
+class MyGame : public Prisma::ECSApplication {
+public:
+    int OnInitialize() override {
+        GetWorld().AddSystem<Prisma::Core::ECS::RenderSystem>();
+        GetWorld().AddSystem<Prisma::Core::ECS::PhysicsSystem>();
+        return 0;
+    }
+};
+```
+
+## CreateApplication factory
+
+Every executable must define this free function. The engine calls it once during startup:
+
+```cpp
+// Declared in EntryPoint.h (Windows)
+extern Prisma::Application* Prisma::CreateApplication();
+
+// Your implementation (e.g., in src/MyGame.cpp)
+Prisma::Application* Prisma::CreateApplication() {
+    Prisma::ApplicationSpecification spec;
+    spec.Name   = "My Game";
+    spec.Width  = 1920;
+    spec.Height = 1080;
+    return new MyGame(spec);
+}
+```
+
+<Note>
+  The engine wraps the raw pointer in a `std::unique_ptr<Application>` immediately after `CreateApplication()` returns. Do not delete the returned object yourself.
+</Note>

@@ -1,0 +1,145 @@
+---
+title: "Building Prisma Engine for Android"
+description: "Deploy Prisma Engine games on Android using Vulkan rendering, GameActivity, and NDK r25+. Gradle handles shader compilation and asset bundling automatically."
+---
+
+Prisma Engine targets Android using Vulkan 1.1+ as its rendering API and GameActivity as the native app entry point. The Android project lives under `projects/android/PrismaAndroid/` and can be built either through Android Studio or via Gradle on the command line. Gradle automatically compiles GLSL shaders to SPIR-V during the build, so you never need to run `glslc` manually — drop `.vert` and `.frag` files into the assets directory and the plugin handles the rest.
+
+## Requirements
+
+- **Android NDK r25 or later** — set `ANDROID_NDK_HOME` in your environment
+- **Android Studio** — for IDE-based builds and device deployment (optional for command-line builds)
+- **Vulkan 1.3 support** on the target device — most devices released after 2020 qualify
+- **CMake 3.20 or later** — bundled with Android Studio, or install separately
+
+<Tip>
+  Vulkan 1.1 is the minimum required by the engine at runtime. Vulkan 1.3 is recommended for access to dynamic rendering and other features used by the forward and deferred pipelines.
+</Tip>
+
+## Project directory structure
+
+The Android Studio project is self-contained under `projects/android/PrismaAndroid/`.
+
+```
+projects/android/PrismaAndroid/
+├── app/
+│   ├── src/main/
+│   │   ├── cpp/          # JNI glue code
+│   │   ├── java/         # Android Activity (MainActivity.java)
+│   │   ├── assets/       # Runtime assets (shaders, textures, fonts)
+│   │   └── res/          # Android resources (icons, strings, etc.)
+│   └── build.gradle.kts  # Gradle build config
+└── ...
+```
+
+JNI glue code that connects the Android runtime to the engine lives in `projects/android/PrismaAndroid/app/src/main/cpp/`. The native entry point (`android_main`) is implemented in `src/runtime/android/AndroidRuntime.cpp`.
+
+## Building with Gradle
+
+Gradle is the recommended way to produce an APK. It invokes CMake internally for the native layer and handles asset bundling, shader compilation, and packaging in a single step.
+
+<Steps>
+  <Step title="Navigate to the Android project">
+    ```bash
+    cd projects/android/PrismaAndroid
+    ```
+  </Step>
+  <Step title="Build a debug APK">
+    ```bash
+    ./gradlew assembleDebug
+    ```
+  </Step>
+  <Step title="Install to a connected device">
+    ```bash
+    ./gradlew installDebug
+    ```
+  </Step>
+</Steps>
+
+To open the project in Android Studio, choose **File → Open** and select the `projects/android/PrismaAndroid` directory. Android Studio detects the Gradle project automatically.
+
+## Building with CMake presets
+
+You can build the native engine and runtime layers directly with CMake presets. All Android presets target `arm64-v8a`.
+
+<CodeGroup>
+
+```bash engine
+# Debug
+cmake --preset engine-android-arm64-debug
+cmake --build --preset engine-android-arm64-debug
+
+# Release
+cmake --preset engine-android-arm64-release
+cmake --build --preset engine-android-arm64-release
+```
+
+```bash runtime
+# Debug
+cmake --preset runtime-android-arm64-debug
+cmake --build --preset runtime-android-arm64-debug
+
+# Release
+cmake --preset runtime-android-arm64-release
+cmake --build --preset runtime-android-arm64-release
+```
+
+</CodeGroup>
+
+Set `ANDROID_NDK_HOME` before configuring if Gradle is not managing the NDK for you:
+
+```bash
+export ANDROID_NDK_HOME=/path/to/ndk
+cmake --preset engine-android-arm64-debug
+cmake --build --preset engine-android-arm64-debug
+```
+
+## Automatic shader compilation
+
+The Android Gradle plugin compiles GLSL shaders to SPIR-V automatically during the build. You do not need to run `glslc` or any shader compiler manually.
+
+- **Source location**: `app/src/main/assets/shaders/**/*.vert`, `**/*.frag`
+- **Output location**: `build/intermediates/shader_assets/**/*.spv`
+- **APK inclusion**: the compiled `.spv` files are bundled into the APK automatically
+
+Place new shaders in `app/src/main/assets/shaders/` and the plugin picks them up on the next Gradle build. Shared GLSL sources (used on both Linux and Android) live in `resources/common/shaders/glsl/`.
+
+## Loading assets at runtime
+
+On Android, all file I/O goes through the Android `AssetManager` — standard filesystem paths are not available for APK assets. The engine provides helpers in `src/runtime/android/ShaderVulkan.*` and `src/runtime/android/TextureAsset.*` that wrap `AssetManager` calls.
+
+```cpp
+// Load a compiled SPIR-V shader from the assets directory
+auto vertShaderCode = ShaderVulkan::loadShader(
+    assetManager, "shaders/skybox.vert.spv"
+);
+
+// Load a texture from the assets directory
+auto texture = TextureAsset::loadAsset(
+    assetManager, "textures/android_robot.png"
+);
+```
+
+Place runtime assets in `projects/android/PrismaAndroid/app/src/main/assets/`. Textures, fonts, and other non-shader assets are placed there directly; shaders are compiled from `assets/shaders/` at build time and their `.spv` outputs are included automatically.
+
+## Audio
+
+<Note>
+  AAudio (Android's native low-latency audio API) is planned but not yet implemented. The current audio backend on Android is SDL3, enabled via `PRISMA_ENABLE_AUDIO_SDL3`. The `PRISMA_ENABLE_AUDIO_AAUDIO` option will be introduced in a future release.
+</Note>
+
+## Conditional compilation
+
+Use the standard platform guards when writing Android-specific code:
+
+```cpp
+#if defined(__ANDROID__)
+    // Android-specific path
+#endif
+
+#if defined(PRISMA_ENABLE_RENDER_VULKAN)
+    // Vulkan-specific path (always true on Android)
+#endif
+```
+
+All available `PRISMA_ENABLE_*` options are defined in `cmake/DeviceOptions.cmake`.

@@ -1,0 +1,220 @@
+---
+title: "Prisma::Engine API reference"
+description: "API reference for Prisma::Engine — the central object managing initialization, the main loop, and shutdown of a Prisma Engine application."
+---
+
+`Prisma::Engine` is the top-level object that owns every engine subsystem. You create one instance on the stack, call `Initialize()`, hand it your `Application`, and call `Run()`. The engine drives the main loop until your application exits, then you call `Shutdown()` to release all resources in the correct order. There is no singleton imposed on you — you hold the object, you control its lifetime.
+
+## EngineSpecification
+
+Configure the engine before construction by filling in `EngineSpecification`.
+
+```cpp
+#include "app/Engine.h"
+
+Prisma::EngineSpecification spec;
+spec.Name                       = "My Game";
+spec.Headless                   = false;
+spec.RefreshAssetDatabaseOnStartup = false;
+spec.MinLogLevel                = Prisma::LogLevel::Trace;
+spec.MaxFPS                     = 0;   // 0 = unlimited
+spec.PresentMode                = Prisma::Graphic::PresentMode::VSync;
+
+Prisma::Engine engine(spec);
+```
+
+<ResponseField name="Name" type="const char*" required>
+  Human-readable name for this application instance. Defaults to `"PrismaEngine"`. Used in window titles and log prefixes.
+</ResponseField>
+
+<ResponseField name="Headless" type="bool">
+  When `true`, the engine skips window creation and all GPU work. Useful for server-side simulation or unit tests. Defaults to `false`.
+</ResponseField>
+
+<ResponseField name="RefreshAssetDatabaseOnStartup" type="bool">
+  When `false` (default), the engine reads `assets/metadata.json` without rewriting it — safe for shipped runtime builds. Set to `true` in editor builds to scan and re-index all assets on launch.
+</ResponseField>
+
+<ResponseField name="MinLogLevel" type="Prisma::LogLevel">
+  Minimum log level that is emitted. Defaults to `LogLevel::Trace` (everything). Set to `LogLevel::Warning` or higher in release builds to reduce log volume.
+</ResponseField>
+
+<ResponseField name="MaxFPS" type="uint32_t">
+  Target frame-rate cap. `0` means no cap — the engine runs as fast as the hardware allows. Defaults to `0`.
+</ResponseField>
+
+<ResponseField name="PresentMode" type="Prisma::Graphic::PresentMode">
+  Swap-chain present strategy. Defaults to `PresentMode::VSync`. See [PresentMode](#presentmode) below.
+</ResponseField>
+
+## Constructor and destructor
+
+```cpp
+namespace Prisma {
+
+class ENGINE_API Engine {
+public:
+    explicit Engine(const EngineSpecification& spec = EngineSpecification());
+    ~Engine();
+
+    Engine(const Engine&) = delete;
+    Engine& operator=(const Engine&) = delete;
+};
+
+} // namespace Prisma
+```
+
+The engine is non-copyable and non-movable. Construct exactly one instance per process. The destructor calls `Shutdown()` automatically if you haven't already done so explicitly.
+
+## Lifecycle methods
+
+### Initialize
+
+```cpp
+int Initialize();
+```
+
+Boots all subsystems in dependency order: logging → window → render device → asset database → input → ECS world → scripting. Returns `0` on success or a non-zero error code if any subsystem fails to start.
+
+<Warning>
+  Call `Initialize()` before `Run()`. Calling `Run()` on an uninitialized engine is undefined behaviour.
+</Warning>
+
+```cpp
+Prisma::Engine engine(spec);
+
+if (engine.Initialize() != 0) {
+    return -1; // subsystem startup failed — check logs
+}
+```
+
+### Run
+
+```cpp
+int Run(std::unique_ptr<Application> app);
+```
+
+Transfers ownership of `app` to the engine and enters the main loop. The loop ticks all subsystems and drives `Application::OnUpdate()`, `Application::OnRender()`, and `Application::OnEvent()` each frame. Returns when `Application::Close()` is called or the window is closed.
+
+<ParamField path="app" type="std::unique_ptr<Prisma::Application>" required>
+  The application to run. The engine takes exclusive ownership — do not hold or use the raw pointer after this call.
+</ParamField>
+
+```cpp
+auto* app  = Prisma::CreateApplication(); // your factory function
+int result = engine.Run(std::unique_ptr<Prisma::Application>(app));
+```
+
+### Shutdown
+
+```cpp
+void Shutdown();
+```
+
+Stops the main loop and tears down all subsystems in reverse-initialization order. Safe to call multiple times — subsequent calls are no-ops. The destructor calls this automatically, but explicit calls give you precise control over shutdown ordering relative to other stack objects.
+
+## Static accessor
+
+```cpp
+static Engine& Get();
+```
+
+Returns a reference to the current engine instance. Useful in deep call stacks where passing the engine explicitly would be cumbersome. Only valid between `Initialize()` and `Shutdown()`.
+
+## Subsystem accessors
+
+Once initialized, the engine exposes typed accessors for every core subsystem:
+
+```cpp
+Graphic::RenderSystem*          engine.GetRenderSystem();
+Graphic::IRenderResourceManager* engine.GetRenderResourceManager();
+AssetManager*                   engine.GetAssetManager();
+Input::InputManager*            engine.GetInputManager();
+SceneManager*                   engine.GetSceneManager();
+PhysicsSystem*                  engine.GetPhysicsSystem();
+JobSystem*                      engine.GetJobSystem();
+Core::ECS::World&               engine.GetWorld();
+Window&                         engine.GetWindow();
+```
+
+All accessors return `nullptr` (or throw) if called before `Initialize()`.
+
+### Generic system access
+
+```cpp
+template<typename T>
+T* GetSystem();
+```
+
+Searches the registered subsystem list and returns the first subsystem of type `T`, or `nullptr` if none exists. Use for optional or custom subsystems added with `AddSystem<T>()`.
+
+### AddSystem
+
+```cpp
+template<typename T, typename... Args>
+T* AddSystem(Args&&... args);
+```
+
+Constructs a subsystem of type `T` in-place and registers it with the engine. The engine owns the subsystem. Returns a raw pointer for immediate use — do not store it beyond the engine's lifetime.
+
+## Frame statistics
+
+```cpp
+struct FrameStats {
+    double BeginFrameTime = 0.0; // ms
+    double RenderTime     = 0.0; // ms
+    double EndFrameTime   = 0.0; // ms
+    double PresentTime    = 0.0; // ms
+    double TotalTime      = 0.0; // ms
+    float  FPS            = 0.0f;
+};
+
+const FrameStats& GetFrameStats() const;
+float             GetFPS()        const;
+const std::string& GetGPUName()   const;
+```
+
+`GetFrameStats()` returns a snapshot of the previous frame's timing breakdown. All times are in milliseconds. Query this once per frame from your application's `OnUpdate()`.
+
+## PresentMode
+
+```cpp
+enum class PresentMode {
+    Immediate, // No sync — may tear. Lowest latency.
+    VSync,     // Wait for vertical blank. No tearing.
+    Mailbox,   // Triple-buffer mailbox. Low latency + no tearing (if supported).
+    Adaptive   // Switches between VSync and Immediate based on frame time.
+};
+```
+
+## Typical setup (from EntryPoint.h)
+
+The Windows entry point that ships with the engine shows the canonical startup sequence:
+
+```cpp
+#include "EntryPoint.h"
+
+// Defined in your game code:
+extern Prisma::Application* Prisma::CreateApplication();
+
+int main(int argc, char** argv) {
+    Prisma::EngineSpecification spec;
+    spec.Name = "Prisma App";
+
+    Prisma::Engine engine(spec);
+
+    if (engine.Initialize() != 0) {
+        return -1;
+    }
+
+    auto* app  = Prisma::CreateApplication();
+    int result = engine.Run(std::unique_ptr<Prisma::Application>(app));
+
+    engine.Shutdown();
+    return result;
+}
+```
+
+<Note>
+  You don't write `main()` yourself when you include `EntryPoint.h` on Windows — this implementation is injected by the header when `PRISMA_PLATFORM_WINDOWS` is defined. You only need to implement `CreateApplication()`.
+</Note>

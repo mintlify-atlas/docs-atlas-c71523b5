@@ -1,0 +1,344 @@
+---
+title: "Entity Component System API reference"
+description: "Reference for Prisma::Core::ECS — World, ISystem, EntityID, and component management for building game logic with systems and entities."
+---
+
+The Prisma Engine ECS is a lightweight system-centric architecture living in `src/engine/core/ECS.h`. You register systems with the `World` singleton, give each system access to the world, and the world drives every enabled system each frame. Components are attached to entity IDs — plain `uint32_t` values that act as handles — and retrieved through the world's component manager.
+
+## Core types
+
+### EntityID
+
+```cpp
+namespace Prisma::Core::ECS {
+
+using EntityID = uint32_t;
+const EntityID INVALID_ENTITY = 0;
+
+} // namespace Prisma::Core::ECS
+```
+
+`EntityID` is a plain integer handle. `INVALID_ENTITY` (`0`) is the sentinel value representing "no entity". Always check against `INVALID_ENTITY` before using an ID returned from a query.
+
+## World
+
+`World` is the central registry. It owns all systems and exposes the component manager.
+
+```cpp
+namespace Prisma::Core::ECS {
+
+class World {
+public:
+    static World& Get();
+
+    template<typename T>
+    void AddSystem();
+
+    void Update(Prisma::Timestep ts);
+
+    template<typename T>
+    T* AddComponent(EntityID entity);
+
+    template<typename T>
+    T* GetComponent(EntityID entity);
+
+    ComponentManager& GetComponentManager();
+};
+
+} // namespace Prisma::Core::ECS
+```
+
+### World::Get
+
+```cpp
+static World& Get();
+```
+
+Returns the process-wide singleton `World`. Valid for the lifetime of the engine. This is the only intended way to obtain the world in application code.
+
+```cpp
+auto& world = Prisma::Core::ECS::World::Get();
+```
+
+### World::AddSystem
+
+```cpp
+template<typename T>
+void AddSystem();
+```
+
+Constructs a system of type `T`, registers it with the world, and calls `T::Initialize()`. Systems are stored in registration order. `T` must inherit from `ISystem`.
+
+<ParamField path="T" type="typename">
+  Any type that inherits from `Prisma::Core::ECS::ISystem`. The world holds a `shared_ptr<ISystem>` internally.
+</ParamField>
+
+```cpp
+world.AddSystem<Prisma::Core::ECS::RenderSystem>();
+world.AddSystem<Prisma::Core::ECS::PhysicsSystem>();
+world.AddSystem<MyCustomSystem>();
+```
+
+### World::Update
+
+```cpp
+void Update(Prisma::Timestep ts);
+```
+
+Iterates all registered systems in order and calls `system->Update(ts)` on each one where `system->enabled == true`. Call this once per frame from your application's `OnUpdate()` (or let `ECSApplication` do it for you).
+
+<ParamField path="ts" type="Prisma::Timestep">
+  The frame timestep. Forwarded unchanged to each system's `Update()`.
+</ParamField>
+
+### World::AddComponent
+
+```cpp
+template<typename T>
+T* AddComponent(EntityID entity);
+```
+
+Attaches a component of type `T` to the given entity and returns a pointer to it. The component is default-constructed.
+
+<ParamField path="entity" type="EntityID" required>
+  The entity to attach the component to. Must not be `INVALID_ENTITY`.
+</ParamField>
+
+### World::GetComponent
+
+```cpp
+template<typename T>
+T* GetComponent(EntityID entity);
+```
+
+Returns a pointer to the `T` component attached to `entity`, or `nullptr` if the entity does not have one.
+
+<ParamField path="entity" type="EntityID" required>
+  The entity to query. Returns `nullptr` for `INVALID_ENTITY`.
+</ParamField>
+
+## ISystem
+
+All game systems implement `ISystem`. Only `Update()` is mandatory.
+
+```cpp
+namespace Prisma::Core::ECS {
+
+class ISystem {
+public:
+    virtual ~ISystem() = default;
+
+    virtual void Initialize() {}
+    virtual void Update(Prisma::Timestep ts) = 0;
+    virtual void Shutdown()  {}
+
+    bool enabled = true;
+
+protected:
+    World* m_world = nullptr; // injected by World::AddSystem
+    friend class World;
+};
+
+} // namespace Prisma::Core::ECS
+```
+
+### ISystem::Initialize
+
+```cpp
+virtual void Initialize();
+```
+
+Called once by `World::AddSystem<T>()` after the system is constructed and `m_world` is set. Acquire resources, subscribe to events, or run one-time setup here.
+
+### ISystem::Update
+
+```cpp
+virtual void Update(Prisma::Timestep ts) = 0;
+```
+
+Called every frame by `World::Update()`, but only when `enabled == true`. This is your primary per-frame hook.
+
+<ParamField path="ts" type="Prisma::Timestep">
+  The elapsed time since the previous frame.
+</ParamField>
+
+### ISystem::Shutdown
+
+```cpp
+virtual void Shutdown();
+```
+
+Called when the world is destroyed or the engine shuts down. Release resources acquired in `Initialize()`.
+
+### ISystem::enabled
+
+```cpp
+bool enabled = true;
+```
+
+When set to `false`, `World::Update()` skips this system entirely. Toggle at runtime to pause individual systems without removing them from the world.
+
+## Built-in systems
+
+Prisma ships the following systems in `src/engine/core/Systems.h`. Register them with `World::AddSystem<T>()`.
+
+### RenderSystem (ECS)
+
+```cpp
+class RenderSystem : public ISystem {
+public:
+    static constexpr SystemTypeID TYPE_ID = 1;
+    void Initialize() override;
+    void Update(Timestep ts) override;
+    void Shutdown()  override;
+};
+```
+
+Collects all entities with `MeshRendererComponent` + `TransformComponent`, sorts opaque geometry by material (to reduce GPU state switches), sorts transparent geometry by depth, and submits draw calls each frame.
+
+### PhysicsSystem
+
+```cpp
+class PhysicsSystem : public ISystem {
+public:
+    static constexpr SystemTypeID TYPE_ID = 2;
+    void Initialize() override;
+    void Update(Timestep ts) override;
+    void Shutdown()  override;
+
+    void SetGravity(const DirectX::XMFLOAT3& gravity);
+    DirectX::XMFLOAT3 GetGravity() const;
+};
+```
+
+Runs a fixed-timestep simulation (default 60 Hz) accumulated via `m_accumulator`. Handles collision detection and resolution for all entities with `RigidBody` and `Collider` components. Default gravity is `(0, -9.81, 0)`.
+
+### AnimationSystem
+
+```cpp
+class AnimationSystem : public ISystem {
+public:
+    static constexpr SystemTypeID TYPE_ID = 3;
+    void Initialize() override;
+    void Update(Timestep ts) override;
+    void Shutdown()  override;
+};
+```
+
+Advances all `AnimationComponent` state machines each frame, interpolating between keyframes and triggering transition events.
+
+### AudioSystem
+
+```cpp
+class AudioSystem : public ISystem {
+public:
+    static constexpr SystemTypeID TYPE_ID = 4;
+    void Initialize() override;
+    void Update(Timestep ts) override;
+    void Shutdown()  override;
+
+    void PlayAudio(EntityID entity, const std::string& audioPath);
+    void StopAudio(EntityID entity);
+    void SetAudioPosition(EntityID entity, const DirectX::XMFLOAT3& position);
+};
+```
+
+Manages `AudioSourceComponent` playback for all audio entities, including 3D positional audio. The underlying audio device is SDL3 (cross-platform) or XAudio2 (Windows native, currently pending interface refactor).
+
+### ScriptSystem
+
+```cpp
+class ScriptSystem : public ISystem {
+public:
+    static constexpr SystemTypeID TYPE_ID = 5;
+    void Initialize() override;
+    void Update(Timestep ts) override;
+    void Shutdown()  override;
+
+    void CallScriptFunction(EntityID entity, const std::string& functionName);
+};
+```
+
+Drives all `ScriptComponent` instances — initialises scripts on the first frame they appear and calls their per-frame update function. The script runtime (Mono / CoreCLR) is managed by the engine's scripting subsystem.
+
+<Note>
+  The scripting system is partially implemented. Mono integration is in progress.
+</Note>
+
+### TransformSystem
+
+```cpp
+class TransformSystem : public ISystem {
+public:
+    static constexpr SystemTypeID TYPE_ID = 6;
+    void Initialize() override;
+    void Update(Timestep ts) override;
+    void Shutdown()  override;
+
+    void SetParent(EntityID entity, EntityID parent);
+    std::vector<EntityID> GetChildren(EntityID entity);
+    DirectX::XMMATRIX GetWorldMatrix(EntityID entity);
+};
+```
+
+Maintains the parent–child transform hierarchy. World matrices are computed lazily: a matrix is only recalculated when the entity or any of its ancestors is marked dirty. Call `SetParent()` to reparent an entity at runtime.
+
+### LightSystem
+
+```cpp
+class LightSystem : public ISystem {
+public:
+    static constexpr SystemTypeID TYPE_ID = 7;
+    void Initialize() override;
+    void Update(Timestep ts) override;
+    void Shutdown()  override;
+
+    const std::vector<EntityID>& GetActiveLights() const;
+    void SetAmbientLight(const DirectX::XMFLOAT3& ambient);
+    const DirectX::XMFLOAT3& GetAmbientLight() const;
+};
+```
+
+Collects all active `LightComponent` entities each frame and makes them available to the render pipeline. Default ambient is `(0.1, 0.1, 0.1)`.
+
+### CameraSystem
+
+```cpp
+class CameraSystem : public ISystem {
+public:
+    static constexpr SystemTypeID TYPE_ID = 8;
+    void Initialize() override;
+    void Update(Timestep ts) override;
+    void Shutdown()  override;
+
+    EntityID GetMainCamera() const;
+    DirectX::XMMATRIX GetViewMatrix(EntityID entity);
+    DirectX::XMMATRIX GetProjectionMatrix(EntityID entity, float aspectRatio);
+};
+```
+
+Finds the main camera entity (the first entity with a `CameraComponent` tagged as main) and recomputes its view and projection matrices each frame. Call `GetViewMatrix()` and `GetProjectionMatrix()` from your rendering code.
+
+## Minimal example
+
+```cpp
+#include "core/ECS.h"
+#include "core/Systems.h"
+
+class MyGame : public Prisma::ECSApplication {
+public:
+    int OnInitialize() override {
+        auto& world = GetWorld();
+
+        world.AddSystem<Prisma::Core::ECS::TransformSystem>();
+        world.AddSystem<Prisma::Core::ECS::CameraSystem>();
+        world.AddSystem<Prisma::Core::ECS::LightSystem>();
+        world.AddSystem<Prisma::Core::ECS::RenderSystem>();
+        world.AddSystem<Prisma::Core::ECS::PhysicsSystem>();
+
+        return 0;
+    }
+};
+```
+
+`ECSApplication::OnUpdate()` calls `World::Update(ts)` automatically — you don't need to call it yourself.

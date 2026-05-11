@@ -1,0 +1,339 @@
+---
+title: "RenderSystem API reference"
+description: "Reference for Prisma::Graphic::RenderSystem — the rendering subsystem with frame control, device access, pipeline management, and scene rendering."
+---
+
+`Prisma::Graphic::RenderSystem` is the engine subsystem that owns the GPU device, swap chain, resource manager, and active render pipeline. The engine constructs and registers it automatically during `Engine::Initialize()` — you access it through `Engine::GetRenderSystem()` rather than constructing it yourself. The system implements `ISubSystem`, so the engine drives its lifecycle and per-frame updates alongside all other subsystems.
+
+## RenderSystemDesc
+
+`RenderSystem` is constructed from a `RenderSystemDesc` that specifies the graphics API, window target, and initial resolution.
+
+```cpp
+namespace Prisma::Graphic {
+
+struct RenderSystemDesc {
+    RenderAPIType backendType      = RenderAPIType::Vulkan;
+    void*         windowHandle     = nullptr;
+    void*         surface          = nullptr;
+    uint32_t      width            = 1600;
+    uint32_t      height           = 900;
+    bool          enableDebug      = true;
+    bool          enableValidation = true;
+    PresentMode   presentMode      = PresentMode::VSync;
+    uint32_t      maxFramesInFlight = 3;
+    std::string   name             = "PrismaApp";
+};
+
+} // namespace Prisma::Graphic
+```
+
+<ResponseField name="backendType" type="RenderAPIType">
+  The graphics API to use. See [RenderAPIType](#renderapitype) below. Defaults to `RenderAPIType::Vulkan`.
+</ResponseField>
+
+<ResponseField name="windowHandle" type="void*">
+  Platform window handle — `HWND` on Windows, `ANativeWindow*` on Android.
+</ResponseField>
+
+<ResponseField name="surface" type="void*">
+  Vulkan surface handle or `nullptr` when using DirectX 12.
+</ResponseField>
+
+<ResponseField name="width" type="uint32_t">
+  Initial render target width in pixels. Defaults to `1600`.
+</ResponseField>
+
+<ResponseField name="height" type="uint32_t">
+  Initial render target height in pixels. Defaults to `900`.
+</ResponseField>
+
+<ResponseField name="enableDebug" type="bool">
+  Enables API-level debug layers (D3D12 debug layer / Vulkan validation layers). Defaults to `true`. Disable in release builds for performance.
+</ResponseField>
+
+<ResponseField name="enableValidation" type="bool">
+  Enables extended validation reporting. Defaults to `true`.
+</ResponseField>
+
+<ResponseField name="presentMode" type="PresentMode">
+  Swap-chain presentation mode. Defaults to `PresentMode::VSync`.
+</ResponseField>
+
+<ResponseField name="maxFramesInFlight" type="uint32_t">
+  Number of frames the CPU can run ahead of the GPU. Defaults to `3`.
+</ResponseField>
+
+<ResponseField name="name" type="std::string">
+  Identifies this render system in debug tools and log output. Defaults to `"PrismaApp"`.
+</ResponseField>
+
+## RenderAPIType
+
+```cpp
+enum class RenderAPIType {
+    None,
+    DirectX12, // Windows
+    Vulkan,    // Windows, Linux, Android
+    OpenGL     // Linux (fallback)
+};
+```
+
+DirectX 12 is the primary backend on Windows. Vulkan is the cross-platform backend used on Windows (editor), Linux, and Android. OpenGL is a fallback path on Linux.
+
+## Class overview
+
+```cpp
+namespace Prisma::Graphic {
+
+class ENGINE_API RenderSystem : public ISubSystem {
+public:
+    explicit RenderSystem(const RenderSystemDesc& desc);
+    ~RenderSystem() override;
+
+    // ISubSystem interface
+    int         Initialize() override;
+    void        Shutdown()   override;
+    void        Update(Timestep ts) override;
+    const char* GetName()    const override { return "RenderSystem"; }
+
+    // Frame control
+    void BeginFrame();
+    void EndFrame();
+    void Present();
+    void Resize(uint32_t width, uint32_t height);
+
+    // Device access
+    IRenderDevice*            GetDevice()                const;
+    IRenderResourceManager*   GetRenderResourceManager() const;
+
+    // Pipeline management
+    void      SetMainPipeline(std::shared_ptr<IPipeline> pipeline);
+    IPipeline* GetMainPipeline() const;
+
+    // Scene rendering
+    void RenderScene(Prisma::Scene* scene, ICamera* camera,
+                     ITexture* targetTexture = nullptr);
+};
+
+} // namespace Prisma::Graphic
+```
+
+## Lifecycle (ISubSystem)
+
+### Initialize
+
+```cpp
+int Initialize() override;
+```
+
+Called by the engine during startup. Runs the following internal stages in order:
+
+1. `InitializeDevice()` — selects and initialises the backend (DX12 or Vulkan), creates the swap chain.
+2. `InitializeRenderResourceManager()` — creates the resource factory and allocators.
+3. `InitializeRenderPipelines()` — constructs the default forward render pipeline.
+
+Returns `0` on success or a non-zero error code on failure. A failure here aborts engine startup.
+
+### Shutdown
+
+```cpp
+void Shutdown() override;
+```
+
+Flushes all in-flight GPU work, destroys pipelines, releases the swap chain, and destroys the device. Called automatically by the engine on exit.
+
+### Update
+
+```cpp
+void Update(Timestep ts) override;
+```
+
+Per-frame housekeeping — updates resource streaming, hot-reload checks for shaders, and any async upload completion. Called by the engine before `BeginFrame()`.
+
+## Frame control
+
+A typical frame calls these four methods in order:
+
+```cpp
+renderSystem->BeginFrame();
+renderSystem->RenderScene(scene, camera);
+renderSystem->EndFrame();
+renderSystem->Present();
+```
+
+### BeginFrame
+
+```cpp
+void BeginFrame();
+```
+
+Acquires the next swap-chain image, resets command allocators for the current frame-in-flight index, and opens command lists. Call once at the start of each rendered frame.
+
+### EndFrame
+
+```cpp
+void EndFrame();
+```
+
+Closes and submits all open command lists to the GPU queue, signals the frame fence, and advances the frame-in-flight counter. Call after all draw calls are submitted for the frame.
+
+### Present
+
+```cpp
+void Present();
+```
+
+Presents the finished frame to the display according to the configured `PresentMode`. Blocks until a swap-chain slot is available when `PresentMode::VSync` is active.
+
+### Resize
+
+```cpp
+void Resize(uint32_t width, uint32_t height);
+```
+
+Recreates the swap chain and all resolution-dependent render targets at the new dimensions. Call from your `OnEvent()` handler when a window resize event is received.
+
+<ParamField path="width" type="uint32_t" required>
+  New render target width in pixels.
+</ParamField>
+
+<ParamField path="height" type="uint32_t" required>
+  New render target height in pixels.
+</ParamField>
+
+## Device access
+
+### GetDevice
+
+```cpp
+IRenderDevice* GetDevice() const;
+```
+
+Returns the underlying render device interface. Use this to create low-level GPU resources (buffers, textures, pipelines) directly. Returns `nullptr` and logs an error if called before `Initialize()`.
+
+### GetRenderResourceManager
+
+```cpp
+IRenderResourceManager* GetRenderResourceManager() const;
+```
+
+Returns the resource manager that wraps the backend-specific resource factories (`DX12ResourceFactory` or `VulkanResourceFactory`). Use this for managed resource creation with automatic lifetime tracking.
+
+## Pipeline management
+
+### SetMainPipeline
+
+```cpp
+void SetMainPipeline(std::shared_ptr<IPipeline> pipeline);
+```
+
+Replaces the active render pipeline. The engine defaults to a `ForwardPipeline` at startup. Pass a `DeferredPipeline` or a custom `IPipeline` implementation to switch rendering strategies at runtime.
+
+<ParamField path="pipeline" type="std::shared_ptr<IPipeline>" required>
+  The new pipeline to use. Ownership is shared — the previous pipeline is destroyed when no other references to it exist.
+</ParamField>
+
+### GetMainPipeline
+
+```cpp
+IPipeline* GetMainPipeline() const;
+```
+
+Returns a raw pointer to the current active pipeline. Valid as long as the `RenderSystem` is alive and `SetMainPipeline()` has not replaced it.
+
+## Scene rendering
+
+### RenderScene
+
+```cpp
+void RenderScene(Prisma::Scene* scene, ICamera* camera,
+                 ITexture* targetTexture = nullptr);
+```
+
+Drives the full scene-rendering path through the current main pipeline: geometry collection → depth pre-pass → opaque pass → transparent pass (forward) or geometry pass → composition pass (deferred). Pass `targetTexture` to render to an off-screen texture instead of the swap chain back buffer.
+
+<ParamField path="scene" type="Prisma::Scene*" required>
+  The scene graph to render. All visible mesh renderers in the scene are submitted to the pipeline.
+</ParamField>
+
+<ParamField path="camera" type="Prisma::Graphic::ICamera*" required>
+  The camera providing the view and projection matrices for this frame.
+</ParamField>
+
+<ParamField path="targetTexture" type="ITexture*">
+  Optional off-screen render target. When `nullptr` (default), output goes to the swap-chain back buffer.
+</ParamField>
+
+## Render pipeline architecture
+
+The following diagram shows how `RenderSystem` sits in the broader rendering stack:
+
+```
+RenderSystem
+├── IRenderDevice
+│   ├── DX12RenderDevice   (Windows)
+│   └── VulkanRenderDevice (Windows / Linux / Android)
+│
+├── IRenderResourceManager
+│   ├── DX12ResourceFactory
+│   └── VulkanResourceFactory
+│
+└── IPipeline (main pipeline)
+    ├── ForwardPipeline
+    │   ├── DepthPrePass
+    │   ├── OpaquePass
+    │   └── TransparentPass
+    └── DeferredPipeline
+        ├── GeometryPass
+        └── CompositionPass
+```
+
+## Renderer (high-level command API)
+
+For code that wants to submit draw calls without touching the pipeline directly, use the static `Renderer` API in `src/engine/graphic/Renderer.h`:
+
+```cpp
+namespace Prisma::Graphic {
+
+struct RenderCommand {
+    Mesh*              mesh;
+    Material*          material;
+    PrismaMath::mat4   transform;
+    BoundingBox        boundingBox;
+    Prisma::Color      color;
+};
+
+class ENGINE_API Renderer {
+public:
+    static void BeginScene(const CameraData& camera);
+    static void Submit(Mesh* mesh, Material* material,
+                       const PrismaMath::mat4& transform,
+                       const Prisma::Color& color = {1,1,1,1});
+    static void EndScene();
+
+    static const std::vector<RenderCommand>& GetCommandQueue();
+    static const SceneData& GetSceneData();
+    static void ClearQueue();
+};
+
+} // namespace Prisma::Graphic
+```
+
+`Renderer::BeginScene()` sets the active camera, `Submit()` enqueues a `RenderCommand`, and `EndScene()` signals that no more commands will arrive this frame. The pipeline retrieves the queue via `GetCommandQueue()` and dispatches the GPU work.
+
+<ParamField path="mesh" type="Mesh*" required>
+  The mesh geometry to draw.
+</ParamField>
+
+<ParamField path="material" type="Material*" required>
+  The material (shader + textures + constants) to apply.
+</ParamField>
+
+<ParamField path="transform" type="const PrismaMath::mat4&" required>
+  World-space transform matrix for this draw call.
+</ParamField>
+
+<ParamField path="color" type="const Prisma::Color&">
+  Per-instance tint color. Defaults to opaque white `(1, 1, 1, 1)`.
+</ParamField>

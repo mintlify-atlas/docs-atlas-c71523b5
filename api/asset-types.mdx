@@ -1,0 +1,386 @@
+---
+title: "Asset types: Texture, Mesh, Tilemap, Cubemap"
+description: "Reference for Prisma Engine's built-in asset types: TextureAsset, MeshAsset, TilemapAsset, and CubemapTextureAsset — fields and serialization formats."
+---
+
+Prisma Engine ships four concrete asset types built on top of the `Asset` base class. Each type implements `Load()`, `Unload()`, and the `ISerializable` interface, and is loaded through `AssetManager`. This page describes the purpose, key fields, serialization format, and usage pattern for each type.
+
+## Asset base class
+
+All asset types derive from `Prisma::Asset`, which provides the shared interface and metadata fields:
+
+```cpp
+// src/engine/core/Asset.h
+namespace Prisma {
+
+class ENGINE_API Asset : public Serialization::ISerializable {
+public:
+    virtual AssetType GetType() const = 0;
+    virtual std::string GetAssetType() const { return "Unknown"; }
+
+    void SetName(const std::string& name);
+    const std::string& GetName() const;
+
+    virtual bool Load(const std::filesystem::path& path) = 0;
+    virtual void Unload() = 0;
+    virtual bool IsLoaded() const;
+
+    bool IsDirty() const;
+    void SetDirty(bool dirty);
+
+    UUID GetHandle() const;
+    void SetHandle(UUID handle);
+
+    const std::filesystem::path& GetPath() const;
+    void SetPath(const std::filesystem::path& path);
+
+    // ISerializable
+    void Serialize(Serialization::OutputArchive& archive) const override;
+    void Deserialize(Serialization::InputArchive& archive) override;
+};
+
+} // namespace Prisma
+```
+
+The `AssetType` enum lists all recognized asset categories:
+
+```cpp
+enum class AssetType {
+    None = 0,
+    Texture,
+    Mesh,
+    Material,
+    Shader,
+    Scene,
+    Audio,
+    Tilemap
+};
+```
+
+---
+
+## TextureAsset
+
+`TextureAsset` represents a 2D image loaded via the **stb_image** library. It is the most commonly used asset type and serves as the source for sprites, UI elements, terrain maps, normal maps, and other surface textures.
+
+### Key fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Width | `int` | Pixel width of the decoded image |
+| Height | `int` | Pixel height of the decoded image |
+| Channels | `int` | Number of color channels (e.g. `4` for RGBA) |
+| PixelData | `std::vector<uint8_t>` | Raw decoded pixel bytes |
+
+### Serialization format
+
+`TextureAsset` supports both JSON and binary (Base64 + zstd) serialization:
+
+**JSON format:**
+```json
+{
+  "Handle": 12345678901234567890,
+  "Name": "textures/terrain_diffuse.png",
+  "Width": 1024,
+  "Height": 1024,
+  "Channels": 4,
+  "PixelData": "<base64-encoded bytes>"
+}
+```
+
+**Binary format:** The pixel data is compressed with zstd before being written, producing significantly smaller files than JSON for high-resolution textures.
+
+### Usage example
+
+```cpp
+// Load a texture synchronously
+AssetHandle<TextureAsset> tex =
+    assetManager.Load<TextureAsset>("textures/terrain_diffuse.png");
+
+if (tex.IsValid()) {
+    int w = tex->GetWidth();
+    int h = tex->GetHeight();
+    // Pass to renderer...
+}
+
+// Serialize to file
+tex->SerializeToFile("terrain_diffuse.json", SerializationFormat::JSON);
+
+// Load from serialized binary
+auto loaded = AssetSerializer::DeserializeFromFile<TextureAsset>(
+    "terrain_diffuse.bin", SerializationFormat::Binary);
+```
+
+<Tip>
+For production builds, prefer the binary format. stb_image decoding followed by zstd compression produces files that load significantly faster than re-decoding PNG/JPG on each launch.
+</Tip>
+
+---
+
+## MeshAsset
+
+`MeshAsset` holds the geometry data for a 3D model — vertex positions, normals, UVs, and index buffers. It is used by the rendering system to draw dynamic and static objects in the scene.
+
+### Key fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Vertices | `std::vector<Vertex>` | Per-vertex data (position, normal, UV) |
+| Indices | `std::vector<uint32_t>` | Triangle index list |
+| SubMeshes | `std::vector<SubMesh>` | Named sub-mesh ranges within the index buffer |
+| BoundingBox | `AABB` | Axis-aligned bounding box for culling |
+
+### Serialization format
+
+**JSON format:**
+```json
+{
+  "Handle": 98765432101234567890,
+  "Name": "meshes/player.obj",
+  "VertexCount": 2048,
+  "IndexCount": 6144,
+  "Vertices": [ ... ],
+  "Indices": [ ... ],
+  "SubMeshes": [
+    { "Name": "Body", "IndexOffset": 0, "IndexCount": 5000 },
+    { "Name": "Eyes", "IndexOffset": 5000, "IndexCount": 1144 }
+  ]
+}
+```
+
+**Binary format:** Vertex and index data is stored raw with a small header, then zstd-compressed. Binary meshes load substantially faster than JSON for models with high vertex counts.
+
+### Usage example
+
+```cpp
+AssetHandle<MeshAsset> mesh =
+    assetManager.Load<MeshAsset>("meshes/player.obj");
+
+if (mesh.IsValid()) {
+    // Submit to render system
+    renderer.SubmitMesh(mesh->GetVertices(), mesh->GetIndices());
+}
+
+// Async load for large models
+assetManager.LoadAsync<MeshAsset>(
+    "meshes/environment.obj",
+    [](AssetHandle<MeshAsset> m) {
+        if (m.IsValid()) {
+            g_envMesh = m;
+        }
+    }
+);
+```
+
+<Note>
+Sub-mesh names are preserved during serialization. The renderer uses sub-mesh ranges to apply different materials to parts of a single mesh without splitting the geometry into separate draw calls.
+</Note>
+
+---
+
+## TilemapAsset
+
+`TilemapAsset` loads 2D tile maps exported from the **Tiled** map editor in `.tmx` (XML) format. It uses **tinyxml2** for parsing and supports multi-layer maps with tile IDs, object layers, and tileset references.
+
+### Key fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Width | `int` | Map width in tiles |
+| Height | `int` | Map height in tiles |
+| TileWidth | `int` | Tile width in pixels |
+| TileHeight | `int` | Tile height in pixels |
+| Layers | `std::vector<TileLayer>` | Ordered tile data layers |
+| ObjectGroups | `std::vector<ObjectGroup>` | Named object layers (collision, spawns, etc.) |
+| Tilesets | `std::vector<TilesetRef>` | Tileset name and first GID |
+
+### TMX input format
+
+`TilemapAsset` reads standard Tiled TMX files directly. Example:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<map version="1.10" orientation="orthogonal"
+     width="64" height="32" tilewidth="16" tileheight="16">
+  <tileset firstgid="1" source="forest.tsx"/>
+  <layer name="Ground" width="64" height="32">
+    <data encoding="csv">1,2,1,3,...</data>
+  </layer>
+  <objectgroup name="Spawns">
+    <object name="PlayerStart" x="128" y="64"/>
+  </objectgroup>
+</map>
+```
+
+### Serialization format
+
+After loading from TMX, a `TilemapAsset` can be re-serialized to JSON or binary for faster runtime reloads:
+
+```json
+{
+  "Handle": 11223344556677889900,
+  "Name": "maps/level1.tmx",
+  "Width": 64,
+  "Height": 32,
+  "TileWidth": 16,
+  "TileHeight": 16,
+  "Layers": [
+    {
+      "Name": "Ground",
+      "Tiles": [1, 2, 1, 3, ...]
+    }
+  ],
+  "ObjectGroups": [
+    {
+      "Name": "Spawns",
+      "Objects": [{ "Name": "PlayerStart", "X": 128, "Y": 64 }]
+    }
+  ]
+}
+```
+
+### Usage example
+
+```cpp
+AssetHandle<TilemapAsset> map =
+    assetManager.Load<TilemapAsset>("maps/level1.tmx");
+
+if (map.IsValid()) {
+    int tileW = map->GetTileWidth();   // 16
+    int tileH = map->GetTileHeight();  // 16
+
+    for (const auto& layer : map->GetLayers()) {
+        renderer.DrawTileLayer(layer, tileW, tileH);
+    }
+}
+```
+
+<Warning>
+Tiled exports TMX files as UTF-8 XML. Ensure your map files use CSV or Base64 tile encoding — tinyxml2 cannot parse the zstd-compressed tile data format that Tiled optionally produces.
+</Warning>
+
+---
+
+## CubemapTextureAsset
+
+`CubemapTextureAsset` loads six images representing the faces of a cube and assembles them into a cubemap used for skyboxes and environment-based reflections. Each face is loaded via stb_image, the same backend used by `TextureAsset`.
+
+### Face order
+
+Faces are expected in this order, matching OpenGL / Vulkan conventions:
+
+| Index | Face |
+|-------|------|
+| 0 | `+X` (Right) |
+| 1 | `-X` (Left) |
+| 2 | `+Y` (Top) |
+| 3 | `-Y` (Bottom) |
+| 4 | `+Z` (Front) |
+| 5 | `-Z` (Back) |
+
+### Key fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| FaceWidth | `int` | Pixel width of each face (all faces must match) |
+| FaceHeight | `int` | Pixel height of each face |
+| Channels | `int` | Channels per face image |
+| Faces | `std::array<std::vector<uint8_t>, 6>` | Decoded pixel data per face |
+
+### Serialization format
+
+**JSON format** — one entry per face:
+```json
+{
+  "Handle": 55667788990011223344,
+  "Name": "cubemaps/sky_day",
+  "FaceWidth": 2048,
+  "FaceHeight": 2048,
+  "Channels": 4,
+  "Faces": {
+    "PosX": "<base64>",
+    "NegX": "<base64>",
+    "PosY": "<base64>",
+    "NegY": "<base64>",
+    "PosZ": "<base64>",
+    "NegZ": "<base64>"
+  }
+}
+```
+
+The asset's `Load()` implementation accepts a manifest JSON file that lists the six face paths:
+
+```json
+{
+  "faces": [
+    "cubemaps/sky_day/right.png",
+    "cubemaps/sky_day/left.png",
+    "cubemaps/sky_day/top.png",
+    "cubemaps/sky_day/bottom.png",
+    "cubemaps/sky_day/front.png",
+    "cubemaps/sky_day/back.png"
+  ]
+}
+```
+
+### Usage example
+
+```cpp
+// Load via manifest JSON
+AssetHandle<CubemapTextureAsset> skybox =
+    assetManager.Load<CubemapTextureAsset>("cubemaps/sky_day.json");
+
+if (skybox.IsValid()) {
+    renderer.SetSkybox(skybox);
+}
+```
+
+<Tip>
+Use 2048×2048 or 4096×4096 HDR face images for physically based rendering environments. The binary serialization format compresses all six faces together, reducing total cubemap size on disk by roughly 60–70% compared to storing raw PNGs.
+</Tip>
+
+---
+
+## Implementing a custom asset type
+
+Extend `Asset` and implement the three required methods:
+
+```cpp
+#include "Asset.h"
+
+class CustomAsset : public Prisma::Asset {
+public:
+    AssetType GetType() const override { return AssetType::None; }
+    std::string GetAssetType() const override { return "Custom"; }
+
+    bool Load(const std::filesystem::path& path) override {
+        // Read and parse file at path
+        m_IsLoaded = true;
+        return true;
+    }
+
+    void Unload() override {
+        m_Data.clear();
+        m_IsLoaded = false;
+    }
+
+    void Serialize(Serialization::OutputArchive& archive) const override {
+        Asset::Serialize(archive);   // write Handle + Name
+        archive("customField", m_Data);
+    }
+
+    void Deserialize(Serialization::InputArchive& archive) override {
+        Asset::Deserialize(archive);
+        archive("customField", m_Data);
+    }
+
+private:
+    std::string m_Data;
+};
+```
+
+Then load it through `AssetManager` like any built-in type:
+
+```cpp
+auto handle = assetManager.Load<CustomAsset>("data/custom.bin");
+```

@@ -1,0 +1,225 @@
+---
+title: "Build Prisma Engine from source using CMake presets"
+description: "Clone the repository and build the engine, editor, or runtime using CMake presets targeting Windows, Linux x64/ARM64, and Android arm64-v8a."
+---
+
+Building from source gives you full access to the engine internals, lets you modify subsystems, and is required if you want to work on the editor, contribute to the project, or target a platform configuration not covered by a prebuilt SDK release. Prisma Engine uses CMake presets to standardize builds across all supported platforms and architectures.
+
+## Prerequisites
+
+Install the following tools before cloning the repository.
+
+- **Git** — with submodule support (`--recursive` clone)
+- **CMake 3.31 or later** — required by `CMakePresets.json`
+- **C++20 compiler**:
+  - Windows: Visual Studio 2022 (MSVC)
+  - Linux: GCC 11+ or Clang 13+
+  - Android: NDK r25+
+- **Vulkan SDK 1.3+** — required for Vulkan builds on Linux and Windows
+- **Ninja** — required for Linux and Android builds (Windows uses Visual Studio generator)
+
+<Tip>
+  The project uses CMake FetchContent by default to download all third-party dependencies (SDL3, ImGui, GLM, VMA, and others) at configure time. You do not need to install them manually unless you set `PRISMA_USE_FETCHCONTENT=OFF` to use vcpkg instead.
+</Tip>
+
+## Clone the repository
+
+Clone the `prune` branch with all submodules. The `prune` branch focuses on the SDL3 + Vulkan rendering path.
+
+```bash
+git clone --recursive https://github.com/Excurs1ons/PrismaEngine.git -b prune
+cd PrismaEngine
+```
+
+If you already cloned without `--recursive`, initialize submodules manually:
+
+```bash
+git submodule update --init --recursive
+```
+
+## One-command build
+
+The `scripts/build.sh` script auto-detects your platform and architecture, selects the appropriate CMake preset, and runs the full configure + build pipeline.
+
+```bash
+# Auto-detect platform, architecture, and preset — builds engine in debug mode
+./scripts/build.sh
+
+# Specify a target and configuration explicitly
+./scripts/build.sh --target editor --config release
+
+# Force a specific preset and clean the build directory first
+./scripts/build.sh --preset editor-linux-arm64-debug --clean
+```
+
+| Option | Description |
+|---|---|
+| `--target` | `engine`, `editor`, or `runtime` |
+| `--config` | `debug` or `release` |
+| `--preset` | Override auto-detection with an exact preset name |
+| `--clean` | Remove the build directory before configuring |
+
+## Build steps
+
+<Steps>
+  <Step title="Configure">
+    Run the CMake configure step using a preset. Presets are defined in `CMakePresets.json` and cover all combinations of target, platform, architecture, and build type.
+
+    ```bash
+    cmake --preset <preset-name>
+    ```
+
+    For example, to configure the editor for Linux x64 in debug mode:
+
+    ```bash
+    cmake --preset editor-linux-x64-debug
+    ```
+  </Step>
+
+  <Step title="Build">
+    Run the build step using the same preset name.
+
+    ```bash
+    cmake --build --preset <preset-name>
+    ```
+
+    Continuing the example above:
+
+    ```bash
+    cmake --build --preset editor-linux-x64-debug
+    ```
+
+    Build output is placed in `build/<preset-name>/`. For example, the Linux x64 debug editor outputs to `build/editor-linux-x64-debug/`.
+  </Step>
+
+  <Step title="Run">
+    After a successful build, run the resulting binary from the build output directory. The binary name matches the target you built (`Engine`, `Editor`, or `Runtime`).
+
+    ```bash
+    ./build/editor-linux-x64-debug/Editor
+    ```
+  </Step>
+</Steps>
+
+## Platform-specific commands
+
+<Tabs>
+  <Tab title="Windows">
+    Windows builds use the Visual Studio 17 2022 generator. You can build from the command line using CMake presets or open the project directly in Visual Studio.
+
+    <CodeGroup>
+
+    ```bash Visual Studio (command line)
+    # Configure and build the editor in debug mode
+    cmake --preset editor-windows-x64-debug
+    cmake --build --preset editor-windows-x64-debug
+
+    # Configure and build the runtime in release mode
+    cmake --preset runtime-windows-x64-release
+    cmake --build --preset runtime-windows-x64-release
+    ```
+
+    ```bash Visual Studio (IDE)
+    # 1. Open the PrismaEngine root folder in Visual Studio 2022
+    # 2. Visual Studio automatically detects CMakePresets.json
+    # 3. Select a preset from the configuration dropdown
+    # 4. Build with Ctrl+Shift+B
+    ```
+
+    </CodeGroup>
+  </Tab>
+  <Tab title="Linux">
+    Linux builds use the Ninja generator. Install Ninja via your package manager if it is not already available (`apt install ninja-build` on Ubuntu/Debian).
+
+    ```bash
+    # Engine — x64 debug
+    cmake --preset engine-linux-x64-debug
+    cmake --build --preset engine-linux-x64-debug
+
+    # Engine — ARM64 debug
+    cmake --preset engine-linux-arm64-debug
+    cmake --build --preset engine-linux-arm64-debug
+
+    # Editor — x64 debug (includes ImGui)
+    cmake --preset editor-linux-x64-debug
+    cmake --build --preset editor-linux-x64-debug
+
+    # Runtime — x64 release
+    cmake --preset runtime-linux-x64-release
+    cmake --build --preset runtime-linux-x64-release
+    ```
+
+    <Warning>
+      Linux CMake presets are defined and tested for x64 and ARM64, but the Vulkan renderer on Linux is still undergoing validation. ARM64 builds cap parallel jobs at `-j4` automatically.
+    </Warning>
+  </Tab>
+  <Tab title="Android">
+    Android builds require the Android NDK r25 or later. Set the `ANDROID_NDK_HOME` environment variable to your NDK installation directory before configuring.
+
+    ```bash
+    export ANDROID_NDK_HOME=/path/to/ndk
+
+    # Engine — arm64-v8a debug
+    cmake --preset engine-android-arm64-debug
+    cmake --build --preset engine-android-arm64-debug
+
+    # Engine — arm64-v8a release
+    cmake --preset engine-android-arm64-release
+    cmake --build --preset engine-android-arm64-release
+
+    # Runtime — arm64-v8a debug
+    cmake --preset runtime-android-arm64-debug
+    cmake --build --preset runtime-android-arm64-debug
+    ```
+
+    Alternatively, use Gradle for a full Android Studio project build:
+
+    ```bash
+    cd projects/android/PrismaAndroid
+    ./gradlew assembleDebug
+    ```
+  </Tab>
+</Tabs>
+
+## Available presets
+
+The table below lists all non-hidden presets defined in `CMakePresets.json`.
+
+| Preset name | Target | Platform | Arch | Config |
+|---|---|---|---|---|
+| `engine-windows-x64-debug` | Engine | Windows | x64 | Debug |
+| `engine-windows-x64-release` | Engine | Windows | x64 | Release |
+| `editor-windows-x64-debug` | Editor | Windows | x64 | Debug |
+| `editor-windows-x64-release` | Editor | Windows | x64 | Release |
+| `runtime-windows-x64-debug` | Runtime | Windows | x64 | Debug |
+| `runtime-windows-x64-release` | Runtime | Windows | x64 | Release |
+| `engine-linux-x64-debug` | Engine | Linux | x64 | Debug |
+| `engine-linux-x64-release` | Engine | Linux | x64 | Release |
+| `engine-linux-arm64-debug` | Engine | Linux | ARM64 | Debug |
+| `engine-linux-arm64-release` | Engine | Linux | ARM64 | Release |
+| `editor-linux-x64-debug` | Editor | Linux | x64 | Debug |
+| `editor-linux-x64-release` | Editor | Linux | x64 | Release |
+| `editor-linux-arm64-debug` | Editor | Linux | ARM64 | Debug |
+| `editor-linux-arm64-release` | Editor | Linux | ARM64 | Release |
+| `runtime-linux-x64-debug` | Runtime | Linux | x64 | Debug |
+| `runtime-linux-x64-release` | Runtime | Linux | x64 | Release |
+| `engine-android-arm64-debug` | Engine | Android | arm64-v8a | Debug |
+| `engine-android-arm64-release` | Engine | Android | arm64-v8a | Release |
+| `runtime-android-arm64-debug` | Runtime | Android | arm64-v8a | Debug |
+| `runtime-android-arm64-release` | Runtime | Android | arm64-v8a | Release |
+
+## Key CMake options
+
+You can pass these options to `cmake --preset` via `-D` flags to override preset defaults.
+
+| Option | Description | Default |
+|---|---|---|
+| `PRISMA_BUILD_EDITOR` | Include the ImGui editor application | `OFF` (most presets) |
+| `PRISMA_BUILD_SHARED_LIBS` | Build the engine as a shared library | `ON` (debug), `OFF` (release) |
+| `PRISMA_USE_FETCHCONTENT` | Download dependencies via CMake FetchContent | `ON` |
+| `PRISMA_ENABLE_RENDER_VULKAN` | Enable the Vulkan rendering backend | Platform-dependent |
+| `PRISMA_ENABLE_RENDER_DX12` | Enable the DirectX 12 rendering backend | `ON` (Windows base) |
+| `PRISMA_ENABLE_AUDIO_SDL3` | Enable the SDL3 audio backend | `ON` (Linux/Android) |
+| `PRISMA_ENABLE_IMGUI_DEBUG` | Enable ImGui debug overlays | `ON` (debug builds) |
+| `PRISMA_USE_NATIVE_AUDIO` | Use platform-native audio instead of SDL3 | `ON` |
+| `PRISMA_USE_NATIVE_INPUT` | Use platform-native input instead of SDL3 | `ON` |

@@ -1,0 +1,160 @@
+---
+title: "Integrating PrismaEngine via CMake find_package"
+description: "Link your game project against PrismaEngine using find_package and the prisma_create_app CMake helper. Covers manual and FetchContent-based SDK integration."
+---
+
+PrismaEngine ships a standard CMake package config file (`PrismaEngineConfig.cmake`) inside its `cmake/` directory. Once you point CMake at the SDK root, `find_package(PrismaEngine REQUIRED)` resolves all include paths, library paths, and imported targets automatically. You can also have CMake download the SDK at configure time using the built-in `file(DOWNLOAD ...)` mechanism — no manual installation required.
+
+## Manual integration
+
+The example below shows a complete `CMakeLists.txt` that downloads the SDK automatically on first configure, then locates and links it using `find_package`. This is the recommended approach for projects that want reproducible, version-pinned SDK builds without a separate installation step.
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(MyGame VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Download PrismaEngine SDK
+set(PRISMA_SDK_VERSION "1.0.1")
+set(PRISMA_SDK_URL "https://github.com/Excurs1ons/PrismaEngine/releases/download/v${PRISMA_SDK_VERSION}-sdk/PrismaEngine-SDK-${PRISMA_SDK_VERSION}-linux-arm64.tar.gz")
+
+set(PRISMA_SDK_DIR "${CMAKE_BINARY_DIR}/PrismaEngine-SDK")
+if(NOT EXISTS "${PRISMA_SDK_DIR}/cmake/PrismaEngineConfig.cmake")
+    message(STATUS "Downloading PrismaEngine SDK...")
+    file(DOWNLOAD "${PRISMA_SDK_URL}" "${CMAKE_BINARY_DIR}/PrismaEngine-SDK.tar.gz" SHOW_PROGRESS)
+    execute_process(COMMAND ${CMAKE_COMMAND} -E tar xzf "${CMAKE_BINARY_DIR}/PrismaEngine-SDK.tar.gz"
+                    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+    file(REMOVE "${CMAKE_BINARY_DIR}/PrismaEngine-SDK.tar.gz")
+    file(RENAME "${CMAKE_BINARY_DIR}/PrismaEngine-SDK-${PRISMA_SDK_VERSION}-linux-arm64" "${PRISMA_SDK_DIR}")
+endif()
+
+list(APPEND CMAKE_PREFIX_PATH "${PRISMA_SDK_DIR}")
+find_package(PrismaEngine REQUIRED)
+
+add_executable(MyGame src/main.cpp src/MyApp.h)
+target_include_directories(MyGame PRIVATE ${PRISMA_SDK_DIR}/include src)
+target_link_libraries(MyGame PRIVATE PrismaEngine::Engine)
+target_link_directories(MyGame PRIVATE "${PRISMA_SDK_DIR}/lib/linux")
+```
+
+<Note>
+  The download only runs when `PrismaEngineConfig.cmake` is not already present in `CMAKE_BINARY_DIR/PrismaEngine-SDK/cmake/`. Subsequent configures skip the download entirely.
+</Note>
+
+## Using find_package with a pre-installed SDK
+
+If you extracted the SDK manually to a fixed location (for example `/opt/PrismaEngine-SDK`), you can skip the download block and pass `PrismaEngine_DIR` at configure time:
+
+```bash
+cmake -B build -DPrismaEngine_DIR=/opt/PrismaEngine-SDK
+cmake --build build
+```
+
+Inside `CMakeLists.txt`, the minimum integration is:
+
+```cmake
+find_package(PrismaEngine REQUIRED)
+
+add_executable(MyGame src/main.cpp)
+target_link_libraries(MyGame PRIVATE PrismaEngine::Engine)
+```
+
+The imported target `PrismaEngine::Engine` carries include directories, compile options, and library paths — you do not need to call `target_include_directories` separately unless you have additional local headers.
+
+## CMake helper functions
+
+The SDK package config exposes two CMake functions that reduce boilerplate for common project types.
+
+### prisma_create_app
+
+`prisma_create_app` creates a PrismaEngine application target with sensible defaults. It wraps `add_executable`, sets output directories, and links `PrismaEngine::Engine` automatically.
+
+```cmake
+prisma_create_app(MyGame
+    FOLDER output
+    SOURCES src/main.cpp
+    LIBRARIES extra_library
+)
+```
+
+| Parameter | Required | Description |
+|---|---|---|
+| `<name>` | Yes | Name of the executable target |
+| `FOLDER` | No | Output directory for the compiled binary |
+| `SOURCES` | No | Additional source files beyond the defaults |
+| `LIBRARIES` | No | Extra libraries to link against |
+
+### prisma_create_editor_extension
+
+`prisma_create_editor_extension` creates a shared library target intended for use as an editor plugin. It links against the editor SDK and configures the correct output path for the editor to discover the extension at runtime.
+
+```cmake
+prisma_create_editor_extension(MyExtension
+    SOURCES
+        src/Extension.cpp
+        src/ExtensionPanel.cpp
+)
+```
+
+| Parameter | Required | Description |
+|---|---|---|
+| `<name>` | Yes | Name of the extension target |
+| `SOURCES` | No | Source files that implement the extension |
+
+## CMake variables
+
+These variables control SDK discovery and download behavior. Set them before calling `find_package`.
+
+| Variable | Description | Example |
+|---|---|---|
+| `PRISMA_SDK_DIR` | Path to the extracted SDK root | `${CMAKE_BINARY_DIR}/PrismaEngine-SDK` |
+| `PRISMA_SDK_VERSION` | SDK version string used to build the download URL | `"1.0.1"` |
+| `PRISMA_SDK_URL` | Full URL to the SDK tarball | Constructed from version + platform |
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Missing Vulkan headers">
+    If CMake cannot find Vulkan headers during engine configuration, install the Vulkan development package for your distribution.
+
+    <CodeGroup>
+
+    ```bash Ubuntu/Debian
+    sudo apt install libvulkan-dev vulkan-tools
+    ```
+
+    ```bash Fedora
+    sudo dnf install vulkan-devel vulkan-tools
+    ```
+
+    </CodeGroup>
+
+    On Windows, download and install the Vulkan SDK from [vulkan.lunarg.com](https://vulkan.lunarg.com). The installer sets the `VULKAN_SDK` environment variable automatically, which CMake uses to locate headers and libraries.
+  </Accordion>
+
+  <Accordion title="Missing SDL3">
+    SDL3 is fetched automatically via CMake FetchContent when `PRISMA_USE_FETCHCONTENT=ON` (the default). If you are building with `PRISMA_USE_FETCHCONTENT=OFF`, install SDL3 manually:
+
+    ```bash
+    vcpkg install sdl3:x64-windows
+    ```
+
+    On Linux you can also install SDL3 from source or use a distribution package if one is available for your version.
+  </Accordion>
+
+  <Accordion title="C++20 compilation errors">
+    Verify that your compiler version meets the minimum requirements:
+
+    ```bash
+    # Check GCC version — needs 11+
+    g++ --version
+
+    # Check Clang version — needs 13+
+    clang++ --version
+    ```
+
+    If your system compiler is too old, install a newer version or use a toolchain file to point CMake at a supported compiler.
+  </Accordion>
+</AccordionGroup>

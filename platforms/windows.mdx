@@ -1,0 +1,156 @@
+---
+title: "Building and running Prisma Engine on Windows"
+description: "Set up Prisma Engine on Windows with DirectX 12 or Vulkan rendering using Visual Studio 2022 or CMake presets. Includes editor and runtime build instructions."
+---
+
+Windows is the primary development platform for Prisma Engine. The engine ships with a DirectX 12 rendering backend as the Windows default, and Vulkan is available as an opt-in alternative. The editor — an ImGui-based scene inspector — is built on Windows by default and uses the Vulkan backend when the `PRISMA_BUILD_EDITOR` flag is set. All three build targets (engine, editor, runtime) are covered by CMake presets that work from the command line or directly from Visual Studio 2022.
+
+## Requirements
+
+Install the following tools before building.
+
+- **Windows 10 or later** — Windows 11 recommended for DirectX 12 feature level 12_2
+- **Visual Studio 2022** — with the "Desktop development with C++" workload (includes MSVC and CMake integration)
+- **CMake 3.20 or later** — bundled with Visual Studio 2022, or install separately
+- **Vulkan SDK** — required if you enable the Vulkan backend via `PRISMA_ENABLE_RENDER_VULKAN`
+
+<Tip>
+  The project uses CMake FetchContent by default to download all third-party dependencies (SDL3, ImGui, GLM, VMA, vk-bootstrap, and others) at configure time. You do not need to install them manually unless you set `PRISMA_USE_FETCHCONTENT=OFF` to switch to vcpkg.
+</Tip>
+
+## Available presets
+
+All Windows presets target the `x64` architecture and use the Visual Studio 17 2022 generator.
+
+| Preset name | Target | Config |
+|---|---|---|
+| `engine-windows-x64-debug` | Engine | Debug |
+| `engine-windows-x64-release` | Engine | Release |
+| `editor-windows-x64-debug` | Editor | Debug |
+| `editor-windows-x64-release` | Editor | Release |
+| `runtime-windows-x64-debug` | Runtime | Debug |
+| `runtime-windows-x64-release` | Runtime | Release |
+
+The **engine** target builds the core library only — no editor, no runtime app. The **editor** target adds the ImGui debug UI and is the target to use during active development. The **runtime** target builds the standalone player for shipping games.
+
+## Build commands
+
+<Tabs>
+  <Tab title="CMake presets (recommended)">
+    Run configure and build as two separate steps. The preset name is the same for both.
+
+    <CodeGroup>
+
+    ```bash engine
+    # Debug
+    cmake --preset engine-windows-x64-debug
+    cmake --build --preset engine-windows-x64-debug
+
+    # Release
+    cmake --preset engine-windows-x64-release
+    cmake --build --preset engine-windows-x64-release
+    ```
+
+    ```bash editor
+    # Debug
+    cmake --preset editor-windows-x64-debug
+    cmake --build --preset editor-windows-x64-debug
+
+    # Release
+    cmake --preset editor-windows-x64-release
+    cmake --build --preset editor-windows-x64-release
+    ```
+
+    ```bash runtime
+    # Debug
+    cmake --preset runtime-windows-x64-debug
+    cmake --build --preset runtime-windows-x64-debug
+
+    # Release
+    cmake --preset runtime-windows-x64-release
+    cmake --build --preset runtime-windows-x64-release
+    ```
+
+    </CodeGroup>
+
+    Build output lands in `build/<preset-name>/`. For example, the release editor outputs to `build/editor-windows-x64-release/`.
+  </Tab>
+  <Tab title="Visual Studio 2022">
+    Visual Studio natively supports `CMakePresets.json` — no solution file required.
+
+    <Steps>
+      <Step title="Open the folder">
+        In Visual Studio 2022, choose **File → Open → Folder** and select the `PrismaEngine` root directory. Visual Studio automatically detects `CMakePresets.json`.
+      </Step>
+      <Step title="Select a preset">
+        Use the configuration dropdown in the toolbar to pick a preset (for example, `editor-windows-x64-debug`). Visual Studio runs the CMake configure step automatically.
+      </Step>
+      <Step title="Build">
+        Press **Ctrl+Shift+B** to build the selected preset, or right-click the target in **Solution Explorer → CMake Targets View** and choose **Build**.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Rendering backends
+
+### DirectX 12 (default)
+
+DirectX 12 is the primary rendering backend on Windows. It is enabled by default for all Windows presets via the `PRISMA_ENABLE_RENDER_DX12` CMake option. No extra SDK installation is required beyond the Windows SDK that ships with Visual Studio.
+
+```cmake
+# DirectX 12 is ON by default on Windows — no flag needed
+# To disable it explicitly:
+cmake --preset engine-windows-x64-debug -DPRISMA_ENABLE_RENDER_DX12=OFF
+```
+
+Shader sources for the DirectX 12 backend are in `resources/common/shaders/hlsl/`.
+
+### Vulkan (opt-in)
+
+Vulkan is available on Windows and is the backend used by the editor target. Enable it by setting `PRISMA_ENABLE_RENDER_VULKAN=ON`. You must have the Vulkan SDK installed and `VULKAN_SDK` set in your environment.
+
+```bash
+cmake --preset engine-windows-x64-debug -DPRISMA_ENABLE_RENDER_VULKAN=ON
+cmake --build --preset engine-windows-x64-debug
+```
+
+Shader sources for Vulkan are in `resources/common/shaders/glsl/`. The Vulkan adapter lives in `src/engine/graphic/adapters/vulkan/`.
+
+<Note>
+  The editor preset (`editor-windows-x64-debug` / `editor-windows-x64-release`) enables Vulkan automatically. The ImGui debug overlay requires the Vulkan backend to be active.
+</Note>
+
+## Key CMake flags
+
+Pass these via `-D` after the preset name to override defaults.
+
+| Flag | Description | Default |
+|---|---|---|
+| `PRISMA_BUILD_EDITOR` | Include the ImGui editor application | `ON` (editor presets only) |
+| `PRISMA_ENABLE_RENDER_DX12` | Enable the DirectX 12 rendering backend | `ON` (Windows) |
+| `PRISMA_ENABLE_RENDER_VULKAN` | Enable the Vulkan rendering backend | `OFF` (Windows base, `ON` for editor) |
+| `PRISMA_BUILD_SHARED_LIBS` | Build the engine as a shared (`.dll`) library | `ON` (debug), `OFF` (release) |
+| `PRISMA_ENABLE_IMGUI_DEBUG` | Enable ImGui debug overlays | `ON` (debug builds) |
+| `PRISMA_USE_NATIVE_AUDIO` | Use XAudio2 instead of SDL3 audio | `ON` |
+| `PRISMA_USE_NATIVE_INPUT` | Use XInput instead of SDL3 input | `ON` |
+
+<Warning>
+  The XAudio2 audio backend (`PRISMA_ENABLE_AUDIO_XAUDIO2`) is currently disabled pending an interface refactor. SDL3 audio (`PRISMA_ENABLE_AUDIO_SDL3`) is the active backend on Windows for now.
+</Warning>
+
+## Conditional compilation
+
+Engine modules are gated by preprocessor defines that mirror the CMake flags. Use these guards in your own code when writing Windows-specific logic:
+
+```cpp
+#if defined(PRISMA_ENABLE_RENDER_DX12)
+    // DirectX 12-specific path
+#endif
+
+#if defined(PRISMA_ENABLE_RENDER_VULKAN)
+    // Vulkan-specific path
+#endif
+```
+
+All available `PRISMA_ENABLE_*` options are defined in `cmake/DeviceOptions.cmake`.

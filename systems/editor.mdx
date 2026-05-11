@@ -1,0 +1,143 @@
+---
+title: "ImGui editor: scene inspection and debug tools"
+description: "Prisma Engine integrates ImGui as a built-in editor for scene inspection, component editing, and debug overlays. Enabled automatically on debug builds."
+---
+
+Prisma Engine ships with an integrated ImGui-based editor that sits on top of the Vulkan rendering backend. The editor renders its UI into a separate ImGui Vulkan pass that shares the GPU device with the engine's main viewport. It is enabled automatically on debug builds and can be toggled at configure time with a single CMake flag.
+
+## How ImGui is integrated
+
+The editor is a separate build target (`src/editor/`) that embeds the engine as a library. The `Editor` class owns an `Engine` instance, drives the main loop, and adds `EditorLayer` to the layer stack. `EditorLayer` implements `OnImGuiRender()`, which is called every frame between the engine's render commands and `Present`.
+
+```
+Editor (master process)
+  ├── Engine  (owned by Editor)
+  │     └── RenderSystem → Vulkan backend
+  └── EditorLayer : Layer
+        ├── OnUpdate(ts)
+        ├── OnRender()        — viewport render pass
+        └── OnImGuiRender()   — scene inspector, component panel, overlays
+```
+
+ImGui resources (descriptor pool, sampler, viewport texture) are managed by `ImGuiVulkanResourceManager`. Viewport textures use a deferred deletion queue to avoid destroying GPU resources while they are still in flight.
+
+## Enabling the editor
+
+`PRISMA_ENABLE_IMGUI_DEBUG` controls whether the ImGui UI is compiled in. It defaults to `ON` for debug configurations:
+
+```cmake
+# Explicitly enable ImGui debug UI (already the default on debug builds)
+-DPRISMA_ENABLE_IMGUI_DEBUG=ON
+
+# Disable for a release engine build (no UI overhead)
+-DPRISMA_ENABLE_IMGUI_DEBUG=OFF
+```
+
+<Note>
+`PRISMA_ENABLE_IMGUI_DEBUG` only controls the ImGui overlay built into engine debug builds. The full editor target (`PRISMA_BUILD_EDITOR`) is a separate flag and is `ON` by default on Windows.
+</Note>
+
+## Building the editor
+
+Use the `editor-{platform}-{arch}-{config}` CMake presets. The editor preset automatically enables Vulkan and ImGui:
+
+<Tabs>
+  <Tab title="Windows">
+    ```bash
+    cmake --preset editor-windows-x64-debug
+    cmake --build --preset editor-windows-x64-debug
+
+    cmake --preset editor-windows-x64-release
+    cmake --build --preset editor-windows-x64-release
+    ```
+
+    You can also open the PrismaEngine root folder in Visual Studio 2022 — it detects the CMake configuration automatically. Build with **Ctrl+Shift+B**.
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    cmake --preset editor-linux-x64-debug
+    cmake --build --preset editor-linux-x64-debug
+
+    # ARM64
+    cmake --preset editor-linux-arm64-debug
+    cmake --build --preset editor-linux-arm64-debug
+    ```
+
+    <Warning>
+    Linux CMake presets are defined but not fully validated. Community testing is welcome. Report issues at the [PrismaEngine GitHub repository](https://github.com/Excurs1ons/PrismaEngine).
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Current editor features
+
+The editor is under active development. The following panels are available:
+
+| Panel | Status | Description |
+|-------|--------|-------------|
+| Scene inspector | In progress (~30%) | Lists scene hierarchy; click to select a `GameObject` |
+| Component panel | In progress (~30%) | Displays components on the selected entity |
+| Viewport | Functional | Renders the engine scene into an ImGui image via Vulkan |
+| Project settings | Functional | `ProjectSettingsWindow` — engine and platform configuration |
+| ImGui demo window | Available | Toggle `m_showDemoWindow` in `Editor` for widget reference |
+
+<Warning>
+The scene inspector and component panel are approximately 30% complete. Editing component values in the UI is not yet fully wired to the engine's ECS. Use these panels for read-only inspection for now.
+</Warning>
+
+## Editor architecture
+
+<Steps>
+  <Step title="Editor::Initialize()">
+    Creates the SDL3 window, initializes the engine, sets up the ImGui Vulkan backend, and allocates the descriptor pool and sampler for viewport texture sampling.
+  </Step>
+  <Step title="Editor::Run()">
+    Drives the main loop: polls SDL3 events via `OnEvent`, calls `OnUpdate`, then `OnRender` (engine scene), then `OnImGuiRender` (editor panels), and finally presents.
+  </Step>
+  <Step title="EditorLayer::OnImGuiRender()">
+    Submits ImGui draw calls for the scene inspector, component panel, viewport image, and any active debug overlays. This is where you add new panels.
+  </Step>
+  <Step title="Editor::Shutdown()">
+    Flushes the deferred deletion queue, destroys ImGui Vulkan resources, shuts down the engine, and destroys the SDL3 window.
+  </Step>
+</Steps>
+
+## Writing an editor extension
+
+Use `prisma_create_editor_extension()` in your CMakeLists.txt to build a shared library that links against the editor target:
+
+```cmake
+# In your extension's CMakeLists.txt
+prisma_create_editor_extension(MyEditorExtension
+    SOURCES
+        src/MyPanel.cpp
+        src/MyPanel.h
+)
+```
+
+The function creates a shared library, sets C++20, links `Editor`, and exports `EDITOR_EXTENSION_EXPORTS=1` so you can mark public symbols with `__declspec(dllexport)` / `__attribute__((visibility("default")))` consistently.
+
+A minimal panel implementation:
+
+```cpp
+#include "engine/core/Layer.h"
+#include <imgui.h>
+
+class MyPanel : public Prisma::Layer {
+public:
+    void OnImGuiRender() override {
+        ImGui::Begin("My Panel");
+        ImGui::Text("Hello from a custom editor extension.");
+        ImGui::End();
+    }
+};
+```
+
+Register your panel by pushing it onto the editor layer stack during initialization.
+
+## CMake options reference
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `PRISMA_BUILD_EDITOR` | `ON` (Windows) | Build the standalone editor target |
+| `PRISMA_ENABLE_IMGUI_DEBUG` | `ON` (debug) | Embed ImGui overlay in engine debug builds |

@@ -1,0 +1,299 @@
+---
+title: "Shader management in Prisma Engine"
+description: "Reference for Prisma Engine shader management — Shader and ShaderLibrary classes, HLSL for DX12, GLSL for Vulkan, and Android SPIR-V auto-compilation."
+---
+
+Prisma Engine compiles and manages shaders through two classes: `Shader` — a loaded, backend-agnostic shader asset — and `ShaderLibrary` — the runtime registry that loads, caches, and hot-reloads shaders during development. Shader source is stored separately per API: HLSL for DirectX 12 and GLSL for Vulkan. On Android, the Gradle build plugin automatically compiles GLSL to SPIR-V before packaging.
+
+## Shader paths
+
+Source files are stored under `resources/common/shaders/` and split by language:
+
+```
+resources/common/shaders/
+├── hlsl/     DirectX 12 shaders (.hlsl)
+└── glsl/     Vulkan / OpenGL shaders (.vert, .frag, .comp)
+```
+
+At runtime the engine loads pre-compiled bytecode: DXIL blobs for DirectX 12 and SPIR-V `.spv` files for Vulkan. The Vulkan path on Android differs — see [Android SPIR-V compilation](#android-spir-v-compilation) below.
+
+## Shader class
+
+`Prisma::Graphic::Shader` is both a `Prisma::Asset` and an `IShader`. It holds the raw SPIR-V bytecode (as `uint32_t[]`), shader reflection data, and an optional RHI resource handle pointing to the backend-created shader object.
+
+```cpp
+namespace Prisma::Graphic {
+
+class ENGINE_API Shader : public Prisma::Asset, public IShader {
+public:
+    Shader() = default;
+    ~Shader() override = default;
+
+    // --- Asset interface ---
+    bool Load(const std::filesystem::path& path) override;
+    void Unload() override;
+    bool IsLoaded() const override;
+    Prisma::AssetType GetType() const override; // AssetType::Shader
+
+    // --- IShader interface ---
+    ShaderType     GetShaderType()  const override;
+    ShaderLanguage GetLanguage()    const override; // ShaderLanguage::SPIRV
+    const std::string& GetEntryPoint() const override;
+    const std::string& GetTarget()     const override;
+    const std::string& GetSource()     const override;
+    const std::string& GetFilename()   const override;
+
+    // Bytecode access
+    const std::vector<uint8_t>&  GetBytecode()    const override;
+    const std::vector<uint32_t>& GetBytecodeRaw() const;
+
+    // Reflection
+    const ShaderReflection& GetReflection()    const override;
+    bool                    HasReflection()    const override;
+    const ShaderResource*   FindResource(const std::string& name) const override;
+    const ShaderResource*   FindResourceByBindPoint(uint32_t bindPoint,
+                                                    uint32_t space) const override;
+
+    // Validation
+    bool Validate() override; // returns IsLoaded()
+
+    // RHI resource
+    void                    SetRHIResource(std::shared_ptr<IShader> rhi);
+    std::shared_ptr<IShader> GetRHIResource() const;
+};
+
+} // namespace Prisma::Graphic
+```
+
+### Load
+
+```cpp
+bool Load(const std::filesystem::path& path) override;
+```
+
+Reads a compiled shader file from disk (SPIR-V `.spv`), stores the raw bytecode in `m_Bytecode` and `m_BytecodeBytes`, and parses the shader reflection data. Returns `true` on success.
+
+<ParamField path="path" type="const std::filesystem::path&" required>
+  Path to the compiled shader file. Relative paths are resolved from the engine's working directory.
+</ParamField>
+
+```cpp
+auto shader = std::make_shared<Prisma::Graphic::Shader>();
+shader->Load("resources/common/shaders/glsl/pbr.vert.spv");
+```
+
+### Unload
+
+```cpp
+void Unload() override;
+```
+
+Releases the bytecode vectors and clears reflection data. The RHI resource handle (`m_RHIResource`) is reset, triggering GPU-side destruction when no other references exist.
+
+### GetBytecodeRaw
+
+```cpp
+const std::vector<uint32_t>& GetBytecodeRaw() const;
+```
+
+Returns the SPIR-V bytecode as `uint32_t` words — the format required by `vkCreateShaderModule`. Use `GetBytecode()` for the equivalent `uint8_t` view.
+
+### GetReflection / FindResource
+
+```cpp
+const ShaderReflection& GetReflection() const override;
+const ShaderResource*   FindResource(const std::string& name) const override;
+const ShaderResource*   FindResourceByBindPoint(uint32_t bindPoint,
+                                                 uint32_t space) const override;
+```
+
+`GetReflection()` returns the full reflection structure parsed when the shader was loaded. `FindResource()` looks up a binding by name; `FindResourceByBindPoint()` looks up by register index and register space (DirectX 12 terminology).
+
+### SetRHIResource / GetRHIResource
+
+```cpp
+void                     SetRHIResource(std::shared_ptr<IShader> rhi);
+std::shared_ptr<IShader> GetRHIResource() const;
+```
+
+The engine sets the RHI resource after uploading the bytecode to the GPU. Retrieve it when you need the backend shader handle for pipeline state creation.
+
+## ShaderType
+
+```cpp
+enum class ShaderType {
+    Vertex,
+    Pixel,
+    Geometry,
+    Hull,
+    Domain,
+    Compute,
+    Unknown
+};
+```
+
+## ShaderLanguage
+
+```cpp
+enum class ShaderLanguage {
+    HLSL,  // DirectX 12
+    GLSL,  // Vulkan / OpenGL source
+    SPIRV  // Compiled intermediate (runtime format)
+};
+```
+
+`Shader::GetLanguage()` always returns `ShaderLanguage::SPIRV` — the engine operates exclusively on compiled bytecode at runtime.
+
+## ShaderLibrary
+
+`ShaderLibrary` is an `ISubSystem` that caches loaded `Shader` objects by name and optionally performs hot-reload polling during development.
+
+```cpp
+namespace Prisma::Graphic {
+
+class ShaderLibrary : public Prisma::ISubSystem {
+public:
+    int         Initialize() override { return 0; }
+    void        Shutdown()   override; // clears all cached shaders
+    void        Update(Prisma::Timestep ts) override; // polls for file changes
+    const char* GetName()    const override { return "ShaderLibrary"; }
+
+    std::shared_ptr<Shader> Load(const std::string& name,
+                                  const std::filesystem::path& path);
+    std::shared_ptr<Shader> Get(const std::string& name);
+};
+
+} // namespace Prisma::Graphic
+```
+
+### ShaderLibrary::Load
+
+```cpp
+std::shared_ptr<Shader> Load(const std::string& name,
+                               const std::filesystem::path& path);
+```
+
+Loads a shader from `path`, stores it under `name`, and returns a shared pointer. If a shader with the same `name` is already cached, the cached version is returned without re-loading from disk.
+
+<ParamField path="name" type="const std::string&" required>
+  Logical name used to retrieve the shader later with `Get()`.
+</ParamField>
+
+<ParamField path="path" type="const std::filesystem::path&" required>
+  Path to the compiled `.spv` or HLSL bytecode file.
+</ParamField>
+
+```cpp
+auto& lib = engine.GetSystem<Prisma::Graphic::ShaderLibrary>();
+
+auto pbrVert = lib->Load("pbr_vert",
+    "resources/common/shaders/glsl/pbr.vert.spv");
+auto pbrFrag = lib->Load("pbr_frag",
+    "resources/common/shaders/glsl/pbr.frag.spv");
+```
+
+### ShaderLibrary::Get
+
+```cpp
+std::shared_ptr<Shader> Get(const std::string& name);
+```
+
+Returns a previously loaded shader by name, or `nullptr` if no shader with that name has been loaded.
+
+<ParamField path="name" type="const std::string&" required>
+  The logical name passed to `Load()`.
+</ParamField>
+
+### Hot reload
+
+`ShaderLibrary::Update()` is called each frame by the engine. It accumulates time and, once per second, checks the modification timestamps of all loaded shader files against the values recorded at load time. When a file has changed on disk, it reloads and replaces the cached `Shader` automatically. This is active only in debug builds.
+
+## ShaderCompileOptions
+
+Pass `ShaderCompileOptions` when using a backend that supports runtime compilation (e.g., HLSL via DXC):
+
+```cpp
+struct ShaderCompileOptions {
+    bool debug                = false;
+    bool optimize             = true;
+    bool skipValidation       = false;
+    bool enable16BitTypes     = false;
+    bool warningsAsErrors     = false;
+    int  optimizationLevel    = 3;    // 0 = none, 3 = maximum
+    std::vector<std::string> additionalDefines;
+    std::string              additionalIncludePath;
+    std::vector<std::string> includeDirectories;
+    std::vector<std::string> dependencies;
+};
+```
+
+<ResponseField name="debug" type="bool">
+  Embed debug information in the bytecode. Disables most optimisations. Defaults to `false`.
+</ResponseField>
+
+<ResponseField name="optimize" type="bool">
+  Enable backend optimisations. Defaults to `true`.
+</ResponseField>
+
+<ResponseField name="optimizationLevel" type="int">
+  Optimisation level from `0` (disabled) to `3` (maximum). Defaults to `3`.
+</ResponseField>
+
+<ResponseField name="warningsAsErrors" type="bool">
+  Treat compile warnings as errors. Defaults to `false`.
+</ResponseField>
+
+<ResponseField name="additionalDefines" type="std::vector<std::string>">
+  Preprocessor defines injected at compile time, e.g. `"ENABLE_SHADOWS"`.
+</ResponseField>
+
+## Android SPIR-V compilation
+
+On Android, GLSL shaders are **not** pre-compiled offline. Instead, the Android Gradle plugin compiles them automatically during the build:
+
+- **Source location**: `projects/android/PrismaAndroid/app/src/main/assets/shaders/`
+- **File extensions**: `.vert`, `.frag`, `.comp`
+- **Output**: `build/intermediates/shader_assets/**/*.spv` — bundled into the APK automatically.
+
+At runtime the engine loads the `.spv` files from the APK asset archive:
+
+```cpp
+// Loading compiled SPIR-V on Android:
+auto vertCode = ShaderVulkan::loadShader(assetManager, "shaders/pbr.vert.spv");
+auto fragCode = ShaderVulkan::loadShader(assetManager, "shaders/pbr.frag.spv");
+```
+
+You do not need to invoke `glslangValidator` or `spirv-cross` manually — the Gradle plugin handles compilation as part of `./gradlew assembleDebug`.
+
+## Per-API shader directories
+
+| Backend | Source language | Source directory | Runtime format |
+|---|---|---|---|
+| DirectX 12 | HLSL | `resources/common/shaders/hlsl/` | DXIL bytecode |
+| Vulkan (desktop) | GLSL | `resources/common/shaders/glsl/` | SPIR-V `.spv` |
+| Vulkan (Android) | GLSL | `assets/shaders/` (in APK) | SPIR-V `.spv` (auto-compiled) |
+| OpenGL (Linux fallback) | GLSL | `resources/common/shaders/glsl/` | GLSL source |
+
+## Example: loading shaders for a custom pipeline
+
+```cpp
+#include "graphic/Shader.h"
+
+void MyPipeline::LoadShaders(Prisma::Graphic::ShaderLibrary& lib) {
+#if defined(PRISMA_ENABLE_RENDER_VULKAN)
+    m_vertShader = lib.Load("my_vert",
+        "resources/common/shaders/glsl/my_pipeline.vert.spv");
+    m_fragShader = lib.Load("my_frag",
+        "resources/common/shaders/glsl/my_pipeline.frag.spv");
+#elif defined(PRISMA_ENABLE_RENDER_DX12)
+    m_vertShader = lib.Load("my_vert",
+        "resources/common/shaders/hlsl/my_pipeline.vert.cso");
+    m_fragShader = lib.Load("my_frag",
+        "resources/common/shaders/hlsl/my_pipeline.frag.cso");
+#endif
+
+    // Bind the compiled RHI resources to your pipeline state object:
+    auto vertRHI = m_vertShader->GetRHIResource();
+    auto fragRHI = m_fragShader->GetRHIResource();
+}
+```

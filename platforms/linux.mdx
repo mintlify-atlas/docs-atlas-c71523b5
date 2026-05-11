@@ -1,0 +1,183 @@
+---
+title: "Building Prisma Engine on Linux (x64 and ARM64)"
+description: "Build Prisma Engine on Linux using GCC or Clang with Vulkan rendering. Supports x64 and ARM64 architectures with CMake presets and an auto-detect build script."
+---
+
+Prisma Engine builds on Linux for both x64 and ARM64 architectures. Vulkan is the primary rendering backend on Linux; OpenGL is listed as a fallback but is not the recommended path. All presets use the Ninja generator, and an auto-detect script (`scripts/build.sh`) lets you build without remembering preset names. The PacMan demo ships with dedicated build, run, and package scripts that work out of the box on both architectures.
+
+<Warning>
+  Linux CMake presets are defined and functional for x64 and ARM64, but the Vulkan renderer on Linux is still undergoing validation. Expect rough edges in edge cases.
+</Warning>
+
+## Requirements
+
+- **GCC 11+ or Clang 13+** — both support the C++20 features used by the engine
+- **CMake 3.20 or later**
+- **Ninja** — required by all Linux presets (`apt install ninja-build`)
+- **Vulkan SDK** — install the `libvulkan-dev` package plus validation layers for development
+
+### Install Vulkan
+
+```bash
+sudo apt install libvulkan-dev vulkan-tools
+```
+
+To also install the validation layers (strongly recommended during development):
+
+```bash
+sudo apt install vulkan-validationlayers
+```
+
+<Tip>
+  The project downloads all other dependencies (SDL3, ImGui, GLM, VMA, vk-bootstrap, and others) via CMake FetchContent at configure time. No manual `apt install` is needed beyond the Vulkan SDK and Ninja.
+</Tip>
+
+## Available presets
+
+Linux presets cover both x64 and ARM64, and all three build targets.
+
+| Preset name | Target | Arch | Config |
+|---|---|---|---|
+| `engine-linux-x64-debug` | Engine | x64 | Debug |
+| `engine-linux-x64-release` | Engine | x64 | Release |
+| `engine-linux-arm64-debug` | Engine | ARM64 | Debug |
+| `engine-linux-arm64-release` | Engine | ARM64 | Release |
+| `editor-linux-x64-debug` | Editor | x64 | Debug |
+| `editor-linux-x64-release` | Editor | x64 | Release |
+| `editor-linux-arm64-debug` | Editor | ARM64 | Debug |
+| `editor-linux-arm64-release` | Editor | ARM64 | Release |
+| `runtime-linux-x64-debug` | Runtime | x64 | Debug |
+| `runtime-linux-x64-release` | Runtime | x64 | Release |
+
+<Note>
+  `runtime-linux-arm64-debug` and `runtime-linux-arm64-release` presets are not listed above because they were not present in `CLAUDE.md` at the time of writing. Use the auto-detect script on ARM64 for runtime builds.
+</Note>
+
+## Build commands
+
+<Tabs>
+  <Tab title="Auto-detect script">
+    The `scripts/build.sh` script detects your platform and architecture automatically, selects the matching preset, and runs both the configure and build steps.
+
+    ```bash
+    # Auto-detect everything — builds engine in debug mode
+    ./scripts/build.sh
+
+    # Specify a target and configuration
+    ./scripts/build.sh --target editor --config release
+
+    # Force a specific preset and clean the build directory
+    ./scripts/build.sh --preset editor-linux-arm64-debug --clean
+    ```
+
+    | Option | Values |
+    |---|---|
+    | `--target` | `engine`, `editor`, `runtime`, `pacman` |
+    | `--config` | `debug`, `release` |
+    | `--preset` | Any preset name from `CMakePresets.json` |
+    | `--clean` | Remove the build directory before configuring |
+  </Tab>
+  <Tab title="CMake presets (x64)">
+    ```bash
+    # Engine — debug
+    cmake --preset engine-linux-x64-debug
+    cmake --build --preset engine-linux-x64-debug
+
+    # Engine — release
+    cmake --preset engine-linux-x64-release
+    cmake --build --preset engine-linux-x64-release
+
+    # Editor — debug (includes ImGui)
+    cmake --preset editor-linux-x64-debug
+    cmake --build --preset editor-linux-x64-debug
+
+    # Editor — release
+    cmake --preset editor-linux-x64-release
+    cmake --build --preset editor-linux-x64-release
+
+    # Runtime — debug
+    cmake --preset runtime-linux-x64-debug
+    cmake --build --preset runtime-linux-x64-debug
+
+    # Runtime — release
+    cmake --preset runtime-linux-x64-release
+    cmake --build --preset runtime-linux-x64-release
+    ```
+  </Tab>
+  <Tab title="CMake presets (ARM64)">
+    ```bash
+    # Engine — debug
+    cmake --preset engine-linux-arm64-debug
+    cmake --build --preset engine-linux-arm64-debug
+
+    # Engine — release
+    cmake --preset engine-linux-arm64-release
+    cmake --build --preset engine-linux-arm64-release
+
+    # Editor — debug
+    cmake --preset editor-linux-arm64-debug
+    cmake --build --preset editor-linux-arm64-debug
+
+    # Editor — release
+    cmake --preset editor-linux-arm64-release
+    cmake --build --preset editor-linux-arm64-release
+    ```
+
+    <Note>
+      On ARM64, parallel build jobs are capped at `-j4` automatically by `scripts/build.sh` to avoid memory pressure on lower-spec boards. If you invoke CMake directly, Ninja uses all available cores by default — add `-- -j4` to the build command if needed.
+    </Note>
+  </Tab>
+</Tabs>
+
+## PacMan demo
+
+The PacMan demo is a self-contained game that ships with the engine as a build target. It has its own isolated output directory separate from the editor builds.
+
+<Steps>
+  <Step title="Build">
+    ```bash
+    ./scripts/build.sh --target pacman --config debug
+    ```
+
+    Output path: `build/pacman-linux-x64-debug/bin/PacManGame` (x64) or `build/pacman-linux-arm64-debug/bin/PacManGame` (ARM64).
+  </Step>
+  <Step title="Run">
+    ```bash
+    ./scripts/run-pacman.sh --config debug
+    ```
+  </Step>
+  <Step title="Package">
+    ```bash
+    ./scripts/package-pacman.sh --config release
+    ```
+
+    Produces a `tar.gz` archive ready for distribution.
+  </Step>
+</Steps>
+
+<Tip>
+  In environments without a connected display or GPU (CI runners, headless servers), PacMan automatically falls back to a text-based console view.
+</Tip>
+
+## Rendering backend
+
+Vulkan is the only actively supported rendering backend on Linux. The OpenGL backend exists as a compile-time option (`PRISMA_ENABLE_RENDER_OPENGL`) but is not the recommended path. Enable Vulkan explicitly if it is not already on in the preset you are using:
+
+```bash
+cmake --preset engine-linux-x64-debug -DPRISMA_ENABLE_RENDER_VULKAN=ON
+cmake --build --preset engine-linux-x64-debug
+```
+
+GLSL shader sources shared with Android live in `resources/common/shaders/glsl/`. The Vulkan adapter implementation is in `src/engine/graphic/adapters/vulkan/`.
+
+## Cross-platform vs native mode
+
+By default the engine uses native platform APIs where available. On Linux this means SDL3 for audio and input. You can switch individual subsystems:
+
+```bash
+# Use SDL3 audio instead of any native backend
+-DPRISMA_USE_NATIVE_AUDIO=OFF
+
+# Use SDL3 input instead of any native backend
+-DPRISMA_USE_NATIVE_INPUT=OFF
+```

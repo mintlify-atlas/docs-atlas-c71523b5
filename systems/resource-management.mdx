@@ -1,0 +1,185 @@
+---
+title: "Asset loading and resource management"
+description: "Prisma Engine's AssetManager handles thread-safe asset loading and caching for textures, meshes, tilemaps, and cubemaps with JSON and binary serialization."
+---
+
+Prisma Engine manages all runtime content through a centralized `AssetManager`. It provides thread-safe loading, reference-counted caching, and a pluggable serialization layer that supports human-readable JSON and compact Base64+zstd binary formats. Every asset type inherits from a common `Asset` base class, keeping resource lifetime consistent across the engine.
+
+## AssetManager overview
+
+`AssetManager` lives in `src/engine/core/AssetManager.*` and is owned by the engine core. It maintains a cache keyed by asset path; subsequent `Load` calls for the same path return the cached instance without re-reading the file.
+
+```cpp
+// Pseudocode — actual API mirrors this pattern
+auto texture = AssetManager::Load<TextureAsset>("textures/terrain_diffuse.png");
+auto mesh    = AssetManager::Load<MeshAsset>("meshes/player.mesh");
+auto tilemap = AssetManager::Load<TilemapAsset>("levels/world1.tmx");
+```
+
+<Note>
+All loads are thread-safe. You can issue asset requests from worker threads; `AssetManager` serializes access to the internal cache with a shared mutex.
+</Note>
+
+## Asset types
+
+<CardGroup cols={2}>
+  <Card title="TextureAsset" icon="image">
+    Loads image data via `stb_image`. Supports PNG, JPEG, BMP, TGA, and HDR. The decoded pixel buffer is passed directly to `IResourceFactory::CreateTexture` on the active render backend.
+  </Card>
+  <Card title="MeshAsset" icon="cube">
+    Holds vertex and index buffers for 3D geometry. Serializable to both JSON and binary formats.
+  </Card>
+  <Card title="TilemapAsset" icon="map">
+    Parses TMX files produced by the [Tiled](https://www.mapeditor.org/) map editor via `tinyxml2`. Stores tile layers, object groups, and tileset references.
+  </Card>
+  <Card title="CubemapTextureAsset" icon="box">
+    Six-face texture used for skyboxes and environment reflections. Each face is loaded as a separate `TextureAsset` slice and combined at upload time.
+  </Card>
+</CardGroup>
+
+## Serialization formats
+
+The engine serialization system is built around two abstract archive types — `OutputArchive` / `InputArchive` — with concrete implementations for JSON and binary.
+
+| Format | Archive classes | Use case |
+|--------|----------------|----------|
+| JSON | `JsonOutputArchive` / `JsonInputArchive` | Authoring, debugging, editor round-trips |
+| Binary | `BinaryOutputArchive` / `BinaryInputArchive` | Shipping builds; ~60% smaller, faster I/O |
+
+Binary archives encode raw data as Base64 and compress the result with `zstd`. TMX tilemaps are always read as XML via `tinyxml2` and converted internally.
+
+### Serializable interface
+
+Every asset implements the `Serializable` interface:
+
+```cpp
+// From src/engine/core/serialization
+class Serializable {
+public:
+    virtual void Serialize(OutputArchive& archive) const = 0;
+    virtual void Deserialize(InputArchive& archive) = 0;
+};
+```
+
+To add a new asset type, subclass `Asset` (which already extends `IResource` and `Serializable`), then implement both virtual methods:
+
+```cpp
+class CustomAsset : public Asset {
+public:
+    // IResource
+    bool Load(const std::filesystem::path& path) override { /* ... */ }
+    void Unload() override { /* ... */ }
+    bool IsLoaded() const override { /* ... */ }
+    ResourceType GetType() const override { /* ... */ }
+    std::string GetAssetType() const override { return "Custom"; }
+
+    // Serializable
+    void Serialize(OutputArchive& archive) const override {
+        archive.BeginObject();
+        archive("metadata", m_metadata);
+        archive("customData", m_customData);
+        archive.EndObject();
+    }
+
+    void Deserialize(InputArchive& archive) override {
+        size_t fieldCount = archive.BeginObject();
+        for (size_t i = 0; i < fieldCount; ++i) {
+            if (archive.HasNextField("metadata"))
+                m_metadata.Deserialize(archive);
+            else if (archive.HasNextField("customData"))
+                m_customData = archive.ReadString();
+        }
+        archive.EndObject();
+    }
+
+private:
+    std::string m_customData;
+};
+```
+
+## Loading and saving assets
+
+### Using AssetSerializer directly
+
+```cpp
+#include "AssetSerializer.h"
+#include "TextureAsset.h"
+
+// Serialize a texture to JSON
+Resources::TextureAsset texture;
+texture.SetMetadata("TerrainDiffuse", "Main terrain diffuse map");
+texture.SetDimensions(1024, 1024, 4);
+
+AssetSerializer::SerializeToFile(texture, "terrain.json",
+                                 SerializationFormat::JSON);
+
+// Deserialize from JSON
+auto loaded = AssetSerializer::DeserializeFromFile<Resources::TextureAsset>(
+    "terrain.json", SerializationFormat::JSON);
+
+// Serialize to compact binary (Base64 + zstd)
+AssetSerializer::SerializeToFile(texture, "terrain.bin",
+                                 SerializationFormat::Binary);
+
+// In-memory round-trip (useful for network or caching)
+auto data = AssetSerializer::SerializeToMemory(texture, SerializationFormat::JSON);
+auto fromMem = AssetSerializer::DeserializeFromMemory<Resources::TextureAsset>(
+    data, SerializationFormat::JSON);
+```
+
+### Android asset loading
+
+On Android, assets are read via `AAssetManager`. The pattern mirrors the desktop API:
+
+```cpp
+// Load a texture asset on Android
+auto texture = TextureAsset::loadAsset(
+    assetManager, "textures/android_robot.png"
+);
+```
+
+Place runtime assets in `projects/android/PrismaAndroid/app/src/main/assets/`.
+
+## Versioning
+
+The serialization system embeds a version header in every file:
+
+```cpp
+// Pin an explicit version for a serialized asset
+SerializationVersion version = {2, 1, 0};
+AssetSerializer::SerializeToFile(asset, "asset_v2.1.json",
+                                 SerializationFormat::JSON, version);
+```
+
+Version metadata is stored at the top of the serialized file and is checked during deserialization to enable forward-compatible loading.
+
+## Error handling
+
+```cpp
+try {
+    auto asset = AssetSerializer::DeserializeFromFile<CustomAsset>("asset.json");
+    if (!asset) {
+        // null returned — file missing or wrong type
+    }
+} catch (const SerializationException& e) {
+    // Malformed data, version mismatch, or I/O error
+    std::cerr << "Serialization error: " << e.what() << '\n';
+}
+```
+
+## HotReloadManager
+
+`HotReloadManager` watches asset directories for file changes and triggers a reload of the affected `Asset` instances without restarting the engine. It is intended for editor and debug builds; enable it alongside `PRISMA_ENABLE_IMGUI_DEBUG`.
+
+<Tip>
+Large assets (high-resolution textures, complex meshes) should use the binary format in shipping builds. JSON is convenient during development but can be 2–5× larger on disk.
+</Tip>
+
+## Resource placement guidelines
+
+| Resource category | Location |
+|------------------|----------|
+| Common assets (all platforms) | `resources/common/` |
+| Platform-specific runtime assets | `resources/runtime/{platform}/` |
+| Editor-only assets | `resources/editor/` |
+| Android runtime assets | `projects/android/PrismaAndroid/app/src/main/assets/` |

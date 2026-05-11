@@ -1,0 +1,282 @@
+---
+title: "CMake helper functions for Prisma Engine games"
+description: "Reference for prisma_create_app() and prisma_create_editor_extension() — CMake SDK helpers for building Prisma Engine games and editor extensions."
+---
+
+The PrismaEngine SDK exposes two CMake helper functions — `prisma_create_app()` and `prisma_create_editor_extension()` — that abstract away the boilerplate required to build a game executable or an editor plugin. Both functions are defined in `cmake/PrismaEngineConfig.cmake.in` and become available after a successful `find_package(PrismaEngine REQUIRED)` call.
+
+## Setup: finding the package
+
+Before using either function, locate the installed SDK with `find_package`:
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(MyGame VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(PrismaEngine REQUIRED)
+```
+
+Point CMake at the SDK by passing `PrismaEngine_DIR` at configure time:
+
+```bash
+# Development mode — point at a local engine build
+cmake -B build -DPrismaEngine_DIR=../PrismaEngine/build/linux-x64-debug
+
+# Installed SDK
+cmake -B build -DPrismaEngine_DIR=/opt/PrismaEngine-SDK/cmake
+```
+
+`find_package` sets the following variables used internally by the helper functions:
+
+| Variable | Description |
+|----------|-------------|
+| `PRISMAENGINE_INCLUDE_DIR` | Path to the public engine headers |
+| `PRISMAENGINE_LIB_DIR` | Path to the compiled engine libraries |
+| `PRISMAENGINE_CMAKE_DIR` | Path to the installed CMake modules |
+
+---
+
+## `prisma_create_app()`
+
+Creates a C++20 executable target linked against `PrismaEngine::Engine`. It handles include directories, C++ standard enforcement, optional extra libraries, output folder configuration, and — on Windows — automatically copies the engine DLL next to the built executable.
+
+### Signature
+
+```cmake
+prisma_create_app(<target>
+    [FOLDER <output_dir>]
+    [SOURCES <source_file>...]
+    [LIBRARIES <library>...]
+)
+```
+
+### Parameters
+
+<ParamField path="target" type="string" required>
+  Name of the CMake executable target to create. This becomes the binary name (`MyGame`, `MyGame.exe`).
+</ParamField>
+
+<ParamField path="FOLDER" type="string">
+  Sets `RUNTIME_OUTPUT_DIRECTORY` on the target. The compiled executable is placed in this directory. If omitted, CMake's default output directory is used.
+</ParamField>
+
+<ParamField path="SOURCES" type="string[]">
+  List of source files added to the target via `target_sources(...  PRIVATE ...)`. If omitted, you must add sources yourself with a separate `target_sources()` call.
+</ParamField>
+
+<ParamField path="LIBRARIES" type="string[]">
+  Additional libraries linked privately against the target. The engine itself (`Engine` / `PrismaEngine::Engine`) is always linked automatically — only list extra dependencies here.
+</ParamField>
+
+### What it does internally
+
+```cmake
+# Simplified equivalent of prisma_create_app()
+add_executable(${APP_NAME})
+target_sources(${APP_NAME} PRIVATE ${ARG_SOURCES})
+set_target_properties(${APP_NAME} PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY ${ARG_FOLDER}   # if FOLDER was given
+)
+target_link_libraries(${APP_NAME} PRIVATE Engine ${ARG_LIBRARIES})
+target_include_directories(${APP_NAME} PRIVATE ${PRISMAENGINE_INCLUDE_DIR})
+
+# Windows only: copy Engine.dll to output dir after build
+if(WIN32)
+    add_custom_command(TARGET ${APP_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:Engine>
+            $<TARGET_FILE_DIR:${APP_NAME}>
+    )
+endif()
+```
+
+### Examples
+
+**Minimal game project:**
+
+```cmake
+find_package(PrismaEngine REQUIRED)
+
+prisma_create_app(MyGame
+    SOURCES src/main.cpp
+)
+```
+
+**Game with multiple sources and an extra physics library:**
+
+```cmake
+find_package(PrismaEngine REQUIRED)
+
+prisma_create_app(MyGame
+    FOLDER output/bin
+    SOURCES
+        src/main.cpp
+        src/GameApp.cpp
+        src/levels/Level1.cpp
+    LIBRARIES
+        MyPhysicsLib
+)
+```
+
+**Using the SDK to build the BasicTriangle sample:**
+
+```bash
+cd sdk/samples/BasicTriangle
+cmake -B build -DPrismaEngine_DIR=../../../build/linux-x64-debug
+cmake --build build
+./build/BasicTriangle
+```
+
+---
+
+## `prisma_create_editor_extension()`
+
+Creates a shared library target linked against the `Editor` target. Editor extensions are loaded by the Prisma editor at startup and can add panels, tools, asset importers, and scene components to the editor UI.
+
+### Signature
+
+```cmake
+prisma_create_editor_extension(<target>
+    [SOURCES <source_file>...]
+)
+```
+
+### Parameters
+
+<ParamField path="target" type="string" required>
+  Name of the CMake shared library target. The output is a `.dll` (Windows) or `.so` (Linux) that the editor discovers and loads at runtime.
+</ParamField>
+
+<ParamField path="SOURCES" type="string[]">
+  Source files compiled into the extension. The extension must export its entry point using the `EDITOR_EXTENSION_EXPORTS=1` macro, which the function defines automatically.
+</ParamField>
+
+### What it does internally
+
+```cmake
+# Simplified equivalent of prisma_create_editor_extension()
+add_library(${EXTENSION_NAME} SHARED ${ARG_SOURCES})
+set_target_properties(${EXTENSION_NAME} PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_link_libraries(${EXTENSION_NAME} PRIVATE Editor)
+target_include_directories(${EXTENSION_NAME} PRIVATE ${PRISMAENGINE_INCLUDE_DIR})
+target_compile_definitions(${EXTENSION_NAME} PRIVATE EDITOR_EXTENSION_EXPORTS=1)
+```
+
+### Example
+
+```cmake
+find_package(PrismaEngine REQUIRED)
+
+prisma_create_editor_extension(MyExtension
+    SOURCES
+        src/Extension.cpp
+        src/ExtensionPanel.cpp
+)
+```
+
+<Warning>
+Editor extensions require `PRISMA_BUILD_EDITOR=ON` in the engine build that produced the SDK. The `Editor` link target will be absent from SDK builds produced without the editor.
+</Warning>
+
+---
+
+## Complete working example
+
+The following `CMakeLists.txt` builds a game executable and an optional editor extension from a single project:
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(MyGame VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Locate the PrismaEngine SDK
+# Pass -DPrismaEngine_DIR=<path> at configure time
+find_package(PrismaEngine REQUIRED)
+
+# ── Game executable ──────────────────────────────────────────
+prisma_create_app(MyGame
+    FOLDER output
+    SOURCES
+        src/main.cpp
+        src/MyGameApp.cpp
+        src/scenes/MainMenu.cpp
+        src/scenes/GameLevel.cpp
+)
+
+# ── Editor extension (optional) ──────────────────────────────
+if(TARGET Editor)
+    prisma_create_editor_extension(MyGameEditorPlugin
+        SOURCES
+            editor/Extension.cpp
+            editor/MyGamePanel.cpp
+    )
+endif()
+```
+
+A matching `src/main.cpp`:
+
+```cpp
+#include <PrismaEngine/PrismaEngine.h>
+
+using namespace PrismaEngine;
+
+class MyGame : public IApplication<MyGame> {
+public:
+    bool Initialize() override {
+        LOG_INFO("MyGame", "Initializing");
+        return Platform::Initialize();
+    }
+
+    int Run() override {
+        // Main game loop
+        return 0;
+    }
+
+    void Shutdown() override {
+        Platform::Shutdown();
+    }
+};
+
+int main() {
+    MyGame game;
+    game.Initialize();
+    return game.Run();
+}
+```
+
+Configure and build:
+
+```bash
+cmake -B build -DPrismaEngine_DIR=/opt/PrismaEngine-SDK/cmake
+cmake --build build
+./build/output/MyGame
+```
+
+---
+
+## System requirements
+
+| Requirement | Minimum version |
+|-------------|----------------|
+| CMake | 3.20 |
+| GCC (Linux) | 11+ |
+| Clang (Linux) | 13+ |
+| MSVC (Windows) | Visual Studio 2022 |
+| NDK (Android) | r25+ |
+| Vulkan SDK | 1.3+ |
+
+<Tip>
+If you see a linker error about missing `Engine` or `Editor` targets after `find_package`, verify that the `PrismaEngine_DIR` path points to a directory containing `PrismaEngineConfig.cmake` — not the SDK root itself.
+</Tip>

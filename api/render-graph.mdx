@@ -1,0 +1,326 @@
+---
+title: "RenderGraph API reference"
+description: "Reference for Prisma::Graphic::RenderGraph — resource handles, pass builders, and automatic dependency management for render pipeline composition."
+---
+
+`Prisma::Graphic::RenderGraph` is a frame graph system for declaring GPU passes and their resource dependencies at a high level. Instead of manually managing resource barriers and execution order, you describe each pass's reads and writes through an `RGBuilder`, then call `Compile()` to resolve the dependency graph and `Execute()` to record and submit the commands. The render graph is currently in active development — the core API is stable, but automatic aliasing and async-compute scheduling are not yet implemented.
+
+<Note>
+  The RenderGraph is marked **in progress** in the engine roadmap. It exists alongside the current `ScriptableRenderPipeline` implementation, which uses explicit `ForwardPipeline` and `DeferredPipeline` passes. The graph API documented here is production-ready for use within those pipelines; full standalone graph execution is under development.
+</Note>
+
+## Resource description
+
+### RGResourceDesc
+
+Describes a GPU resource to be created and managed by the graph.
+
+```cpp
+namespace Prisma::Graphic {
+
+struct RGResourceDesc {
+    enum class Type   { Texture2D, Buffer, RenderTarget };
+    enum class Format { RGBA8, RGBA16F, D32F };
+
+    Type     type;
+    uint32_t width;
+    uint32_t height;
+    Format   format;
+
+    // Convenience factory
+    static RGResourceDesc Texture2D(uint32_t w, uint32_t h,
+                                    Format f = Format::RGBA8);
+};
+
+} // namespace Prisma::Graphic
+```
+
+<ResponseField name="type" type="RGResourceDesc::Type" required>
+  The resource category: `Texture2D`, `Buffer`, or `RenderTarget`.
+</ResponseField>
+
+<ResponseField name="width" type="uint32_t">
+  Width in pixels (textures and render targets only).
+</ResponseField>
+
+<ResponseField name="height" type="uint32_t">
+  Height in pixels (textures and render targets only).
+</ResponseField>
+
+<ResponseField name="format" type="RGResourceDesc::Format">
+  Pixel format of the resource. `RGBA8` for standard colour, `RGBA16F` for HDR, `D32F` for depth.
+</ResponseField>
+
+#### RGResourceDesc::Texture2D (factory)
+
+```cpp
+static RGResourceDesc Texture2D(uint32_t w, uint32_t h,
+                                 Format f = Format::RGBA8);
+```
+
+Convenience factory that fills in `type = Type::Texture2D` automatically.
+
+```cpp
+auto hdrDesc = RGResourceDesc::Texture2D(1920, 1080, RGResourceDesc::Format::RGBA16F);
+auto depthDesc = RGResourceDesc::Texture2D(1920, 1080, RGResourceDesc::Format::D32F);
+```
+
+### RGResourceHandle
+
+```cpp
+struct RGResourceHandle {
+    uint32_t id = 0xFFFFFFFF;
+
+    bool IsValid() const { return id != 0xFFFFFFFF; }
+};
+```
+
+An opaque, strongly-typed handle to a resource tracked by the graph. Obtain handles from `RGBuilder::CreateTexture()`. Pass them to `RGBuilder::Read()` and `RGBuilder::Write()` to declare pass dependencies. Always check `IsValid()` before using a handle.
+
+## Pass builder
+
+### RGBuilder
+
+Each pass receives an `RGBuilder` during its setup lambda. Use it to declare resource creation and access patterns — the graph uses this information to infer execution order and schedule barriers.
+
+```cpp
+namespace Prisma::Graphic {
+
+class RGBuilder {
+public:
+    RGResourceHandle CreateTexture(const RGResourceDesc& desc,
+                                   const std::string& name);
+    void Read(RGResourceHandle handle);
+    void Write(RGResourceHandle handle);
+};
+
+} // namespace Prisma::Graphic
+```
+
+### RGBuilder::CreateTexture
+
+```cpp
+RGResourceHandle CreateTexture(const RGResourceDesc& desc,
+                                const std::string& name);
+```
+
+Registers a new transient texture with the graph and returns its handle. The resource is not allocated on the GPU until `Compile()` is called.
+
+<ParamField path="desc" type="const RGResourceDesc&" required>
+  Describes the texture dimensions and format.
+</ParamField>
+
+<ParamField path="name" type="const std::string&" required>
+  Debug name for the resource, visible in GPU frame capture tools such as RenderDoc and PIX.
+</ParamField>
+
+### RGBuilder::Read
+
+```cpp
+void Read(RGResourceHandle handle);
+```
+
+Declares that the current pass reads from the resource identified by `handle`. The graph uses this to insert a read barrier before the pass executes.
+
+<ParamField path="handle" type="RGResourceHandle" required>
+  A valid handle returned by a previous `CreateTexture()` call on this or an earlier pass.
+</ParamField>
+
+### RGBuilder::Write
+
+```cpp
+void Write(RGResourceHandle handle);
+```
+
+Declares that the current pass writes to the resource identified by `handle`. The graph uses this to insert a write barrier and to establish that this pass must execute before any pass that reads the same resource.
+
+<ParamField path="handle" type="RGResourceHandle" required>
+  A valid handle returned by `CreateTexture()`.
+</ParamField>
+
+## RenderGraph
+
+```cpp
+namespace Prisma::Graphic {
+
+class ENGINE_API RenderGraph {
+public:
+    explicit RenderGraph(IRenderDevice* device);
+    ~RenderGraph();
+
+    template<typename PassData, typename SetupFunc, typename ExecuteFunc>
+    void AddPass(const std::string& name, SetupFunc&& setup, ExecuteFunc&& execute);
+
+    void Compile();
+    void Execute(RenderCommandContext* cmd);
+};
+
+} // namespace Prisma::Graphic
+```
+
+### Constructor
+
+```cpp
+explicit RenderGraph(IRenderDevice* device);
+```
+
+<ParamField path="device" type="IRenderDevice*" required>
+  The render device used to allocate GPU resources at compile time. Obtain from `RenderSystem::GetDevice()`.
+</ParamField>
+
+### RenderGraph::AddPass
+
+```cpp
+template<typename PassData, typename SetupFunc, typename ExecuteFunc>
+void AddPass(const std::string& name, SetupFunc&& setup, ExecuteFunc&& execute);
+```
+
+Registers a render pass. The `setup` lambda runs immediately during `AddPass()` to declare resources and produce `PassData`. The `execute` lambda is stored and called later during `Execute()`.
+
+<ParamField path="name" type="const std::string&" required>
+  Unique name for this pass. Used in GPU capture tools and error messages.
+</ParamField>
+
+<ParamField path="setup" type="SetupFunc&&" required>
+  A callable with signature `void(RGBuilder& builder, PassData& data)`. Declare all resource reads and writes here. Do not issue GPU commands.
+</ParamField>
+
+<ParamField path="execute" type="ExecuteFunc&&" required>
+  A callable with signature `void(const PassData& data, RGContext& ctx)`. Issue GPU commands through `ctx.GetCmd()`. Called during `Execute()` in dependency-resolved order.
+</ParamField>
+
+```cpp
+struct GBufferData {
+    RGResourceHandle albedo;
+    RGResourceHandle depth;
+};
+
+graph.AddPass<GBufferData>(
+    "GBufferPass",
+    // Setup lambda — declares resources
+    [](RGBuilder& builder, GBufferData& data) {
+        data.albedo = builder.CreateTexture(
+            RGResourceDesc::Texture2D(1920, 1080, RGResourceDesc::Format::RGBA8),
+            "GBuffer_Albedo"
+        );
+        data.depth = builder.CreateTexture(
+            RGResourceDesc::Texture2D(1920, 1080, RGResourceDesc::Format::D32F),
+            "GBuffer_Depth"
+        );
+        builder.Write(data.albedo);
+        builder.Write(data.depth);
+    },
+    // Execute lambda — issues GPU commands
+    [](const GBufferData& data, RGContext& ctx) {
+        auto* cmd = ctx.GetCmd();
+        // ... bind pipeline, set render targets, draw geometry ...
+    }
+);
+```
+
+### RenderGraph::Compile
+
+```cpp
+void Compile();
+```
+
+Analyses the declared pass graph, resolves execution order by dependency topological sort, allocates transient GPU resources, and schedules the required resource barriers. Call once after all passes have been registered, before `Execute()`.
+
+<Warning>
+  Do not call `AddPass()` after `Compile()`. Build the full pass list first, then compile and execute.
+</Warning>
+
+### RenderGraph::Execute
+
+```cpp
+void Execute(RenderCommandContext* cmd);
+```
+
+Runs all passes in the compiled order, inserting resource barriers as determined by `Compile()`. Each pass's execute lambda is called with the appropriate `RGContext` wrapping the provided command context.
+
+<ParamField path="cmd" type="RenderCommandContext*" required>
+  The command context to record into. Obtain from the current frame's command list via `IRenderDevice`.
+</ParamField>
+
+## Execution context
+
+### RGContext
+
+```cpp
+class RGContext {
+public:
+    explicit RGContext(RenderCommandContext* cmd);
+    RenderCommandContext* GetCmd() const;
+};
+```
+
+Passed to each pass's execute lambda. Call `GetCmd()` to access the underlying command context for issuing draw calls, dispatches, and copy operations.
+
+## Relationship to built-in pipelines
+
+The current forward and deferred pipelines are implemented as explicit pass classes rather than `RenderGraph` nodes:
+
+```
+ForwardPipeline
+├── DepthPrePass   — depth-only pre-pass, reduces overdraw
+├── OpaquePass     — full shading for opaque geometry
+└── TransparentPass — alpha-blended geometry, depth-sorted back-to-front
+
+DeferredPipeline
+├── GeometryPass   — writes albedo, normals, and depth to the G-buffer
+└── CompositionPass — full-screen lighting accumulation pass
+```
+
+These will be migrated to `RenderGraph` passes in a future release. New custom pipelines are encouraged to adopt the `RenderGraph` API now so that automatic barrier scheduling and resource aliasing can be enabled as the system matures.
+
+## Full two-pass example
+
+```cpp
+#include "graphic/RenderGraph.h"
+
+void BuildExampleGraph(Prisma::Graphic::IRenderDevice* device,
+                       Prisma::Graphic::RenderCommandContext* cmd) {
+    Prisma::Graphic::RenderGraph graph(device);
+
+    // --- Pass 1: geometry ---
+    struct ShadowData { Prisma::Graphic::RGResourceHandle shadowMap; };
+
+    graph.AddPass<ShadowData>(
+        "ShadowPass",
+        [](Prisma::Graphic::RGBuilder& builder, ShadowData& data) {
+            data.shadowMap = builder.CreateTexture(
+                Prisma::Graphic::RGResourceDesc::Texture2D(
+                    2048, 2048, Prisma::Graphic::RGResourceDesc::Format::D32F),
+                "ShadowMap");
+            builder.Write(data.shadowMap);
+        },
+        [](const ShadowData& data, Prisma::Graphic::RGContext& ctx) {
+            // render shadow casters into depth buffer
+        }
+    );
+
+    // --- Pass 2: lighting that reads the shadow map ---
+    struct LightingData {
+        Prisma::Graphic::RGResourceHandle shadowMap;
+        Prisma::Graphic::RGResourceHandle output;
+    };
+
+    graph.AddPass<LightingData>(
+        "LightingPass",
+        [](Prisma::Graphic::RGBuilder& builder, LightingData& data) {
+            // shadow map was created above — just declare a read dependency
+            data.output = builder.CreateTexture(
+                Prisma::Graphic::RGResourceDesc::Texture2D(
+                    1920, 1080, Prisma::Graphic::RGResourceDesc::Format::RGBA16F),
+                "LitOutput");
+            builder.Write(data.output);
+        },
+        [](const LightingData& data, Prisma::Graphic::RGContext& ctx) {
+            // sample shadow map, accumulate lights
+        }
+    );
+
+    graph.Compile();
+    graph.Execute(cmd);
+}
+```

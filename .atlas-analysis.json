@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Prisma Engine",
+  "projectType": "framework",
+  "projectName": "Prisma Engine",
+  "projectDescription": "A cross-platform 3D game engine built with modern C++20, featuring Vulkan/DirectX 12 rendering, an ECS architecture, SDL3 audio, and an integrated ImGui editor.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#94cb04",
-    "light": "#545454"
-  },
-  "favicon": "https://media.brand.dev/288cc7c4-5cef-4376-950b-bdf0083eedae.png",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/Excurs1ons/PrismaEngine"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/Excurs1ons/PrismaEngine"
-    }
-  },
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
   "navigation": {
     "tabs": [
       {
@@ -103,5 +91,40 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Multi-backend rendering: Vulkan (cross-platform) and DirectX 12 (Windows)",
+    "High-performance Entity Component System (ECS) architecture",
+    "Cross-platform SDL3 audio with 3D spatial sound support",
+    "Integrated ImGui-based editor with scene inspector",
+    "Smart dependency management via CMake FetchContent",
+    "Asset management with JSON and binary (Base64+zstd) serialization",
+    "Forward and Deferred render pipelines",
+    "Android, Windows, Linux, and WebAssembly platform support",
+    "Thread-safe cross-platform logging system",
+    "Layered platform abstraction with native and SDL3 mode"
+  ],
+  "publicApiSurface": [
+    "Prisma::Engine",
+    "Prisma::Application",
+    "Prisma::IApplication<T>",
+    "Prisma::Core::ECS::World",
+    "Prisma::Core::ECS::ISystem",
+    "PrismaEngine::Graphic::RenderSystem",
+    "PrismaEngine::Graphic::RenderGraph",
+    "PrismaEngine::Graphic::Renderer",
+    "PrismaEngine::Graphic::Renderer2D",
+    "PrismaEngine::Graphic::Material",
+    "PrismaEngine::Graphic::Mesh",
+    "PrismaEngine::Graphic::Shader",
+    "PrismaEngine::Graphic::CameraComponent",
+    "PrismaEngine::AssetManager",
+    "PrismaEngine::TextureAsset",
+    "PrismaEngine::MeshAsset",
+    "PrismaEngine::TilemapAsset",
+    "PrismaEngine::CubemapTextureAsset",
+    "prisma_create_app() (CMake)",
+    "prisma_create_editor_extension() (CMake)",
+    "PrismaEngine::Engine CMake package"
+  ]
 }

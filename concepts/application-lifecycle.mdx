@@ -1,0 +1,283 @@
+---
+title: "Application lifecycle in Prisma Engine"
+description: "Understand how Prisma Engine initializes, runs the main loop, and shuts down. Learn the correct pattern for building your game application class."
+---
+
+Every Prisma Engine program follows the same lifecycle: the `Engine` object is constructed on the stack, initialized, handed an `Application` subclass to run, and then cleanly shut down. Understanding this sequence is essential — skipping or misordering any step produces a process that either fails to start or exits immediately without rendering a frame.
+
+## The EntryPoint pattern
+
+On Windows, `EntryPoint.h` defines `main` for you. It constructs an `Engine`, calls `Initialize()`, creates your `Application` via the `CreateApplication` factory function you implement, runs the main loop via `engine.Run()`, and shuts down:
+
+```cpp
+// engine/EntryPoint.h  (Windows — included automatically by the build system)
+#ifdef PRISMA_PLATFORM_WINDOWS
+
+extern Prisma::Application* Prisma::CreateApplication();
+
+int main(int argc, char** argv) {
+    // 1. Configure the engine
+    Prisma::EngineSpecification spec;
+    spec.Name = "Prisma App";
+
+    // 2. Construct the Engine on the stack
+    Prisma::Engine engine(spec);
+
+    // 3. Initialize all subsystems
+    if (engine.Initialize() != 0) {
+        return -1;
+    }
+
+    // 4. Create your Application and enter the main loop
+    auto* app = Prisma::CreateApplication();
+    int result = engine.Run(std::unique_ptr<Prisma::Application>(app));
+
+    // 5. Explicit shutdown (destructor also handles this)
+    engine.Shutdown();
+
+    return result;
+}
+
+#endif
+```
+
+<Note>
+  You do not write `main` yourself. Define `Prisma::CreateApplication()` in your game code and return a heap-allocated instance of your `Application` subclass. The entry-point header wires everything else together.
+</Note>
+
+## Lifecycle steps
+
+<Steps>
+  <Step title="Engine construction">
+    Allocate the `Engine` object on the stack and supply an `EngineSpecification`:
+
+    ```cpp
+    // engine/app/Engine.h
+    struct EngineSpecification {
+        const char* Name = "PrismaEngine";
+        bool Headless = false;
+        bool RefreshAssetDatabaseOnStartup = false;
+        LogLevel MinLogLevel = LogLevel::Trace;
+        uint32_t MaxFPS = 0;
+        Graphic::PresentMode PresentMode = Graphic::PresentMode::VSync;
+    };
+
+    Prisma::EngineSpecification spec;
+    spec.Name = "MyGame";
+    spec.PresentMode = Prisma::Graphic::PresentMode::VSync;
+
+    Prisma::Engine engine(spec);
+    ```
+
+    The constructor does not start any subsystems. It only stores the specification.
+  </Step>
+  <Step title="Initialize">
+    Call `engine.Initialize()`. This starts every registered subsystem — the window, renderer, asset manager, input manager, job system, and ECS world — in the correct dependency order.
+
+    ```cpp
+    if (engine.Initialize() != 0) {
+        return -1;  // Subsystem initialization failed; check the log
+    }
+    ```
+
+    After `Initialize()` returns successfully you can access subsystems via `Engine::Get()`:
+
+    ```cpp
+    auto* assets  = Prisma::Engine::Get().GetAssetManager();
+    auto* input   = Prisma::Engine::Get().GetInputManager();
+    auto& world   = Prisma::Engine::Get().GetWorld();
+    ```
+  </Step>
+  <Step title="Run the application">
+    Pass your `Application` to `engine.Run()`. This transfers ownership and blocks until the application requests a close or the window is destroyed:
+
+    ```cpp
+    auto* app = Prisma::CreateApplication();
+    int result = engine.Run(std::unique_ptr<Prisma::Application>(app));
+    ```
+
+    Internally, `Run` calls your application's `OnInitialize()`, then drives the main loop — dispatching events, calling `OnUpdate(ts)`, and calling `OnRender()` — until `Application::Close()` is called or the window closes.
+  </Step>
+  <Step title="Shutdown">
+    After `Run` returns, call `engine.Shutdown()` to release GPU resources, flush pending I/O, and tear down subsystems in reverse initialization order:
+
+    ```cpp
+    engine.Shutdown();
+    ```
+
+    The `Engine` destructor also calls `Shutdown` if you omit the explicit call, but calling it explicitly gives you better control over teardown ordering.
+  </Step>
+</Steps>
+
+## Implementing the Application class
+
+Your game code implements `Prisma::Application`. Override the lifecycle hooks you need:
+
+```cpp
+// engine/app/Application.h
+struct ApplicationSpecification {
+    std::string Name = "Prisma App";
+    std::string EntryScene = "";
+    uint32_t Width = 1280;
+    uint32_t Height = 720;
+    bool Fullscreen = false;
+    bool Resizable = true;
+    Graphic::PresentMode PresentMode = Graphic::PresentMode::VSync;
+    uint32_t MaxFPS = 0;
+};
+
+class ENGINE_API Application {
+public:
+    Application(const ApplicationSpecification& spec = ApplicationSpecification());
+    virtual ~Application();
+
+    // Required — called once before the main loop starts
+    virtual int OnInitialize() = 0;
+
+    // Optional — called every frame
+    virtual void OnUpdate(Timestep ts);
+    virtual void OnRender();
+    virtual void OnEvent(Event& e);
+
+    // Optional — called during shutdown
+    virtual void OnShutdown();
+
+    // Optional — ImGui overlay (debug builds only)
+    virtual int OnImGuiInitialize() { return -1; }
+    virtual void OnImGuiRender();
+
+    void Close();                          // Request engine shutdown
+    bool IsRunning() const;
+    LayerStack& GetLayerStack();
+    void PushLayer(Layer* layer);
+    void PushOverlay(Layer* overlay);
+};
+```
+
+### Minimal game application
+
+```cpp
+#include "app/Application.h"
+#include "app/Engine.h"
+#include "core/ECS.h"
+#include "core/Systems.h"
+
+class MyGame : public Prisma::Application {
+public:
+    MyGame()
+        : Prisma::Application([]() {
+            Prisma::ApplicationSpecification spec;
+            spec.Name   = "MyGame";
+            spec.Width  = 1920;
+            spec.Height = 1080;
+            return spec;
+        }()) {}
+
+    int OnInitialize() override {
+        // Register ECS systems
+        auto& world = Prisma::Engine::Get().GetWorld();
+        world.AddSystem<Prisma::Core::ECS::TransformSystem>();
+        world.AddSystem<Prisma::Core::ECS::RenderSystem>();
+        world.AddSystem<PlayerMovementSystem>();
+        return 0;
+    }
+
+    void OnUpdate(Prisma::Timestep ts) override {
+        // Game logic — ts.GetDeltaTime() is seconds since last frame
+    }
+
+    void OnEvent(Prisma::Event& e) override {
+        // Dispatch events to layers, input manager, etc.
+        Prisma::Application::OnEvent(e);  // Let base class run first
+    }
+};
+
+// Factory function required by EntryPoint.h
+Prisma::Application* Prisma::CreateApplication() {
+    return new MyGame();
+}
+```
+
+## The Layer and LayerStack system
+
+`Application` manages a `LayerStack` — an ordered list of `Layer` objects that each receive events, updates, and render callbacks. Layers let you modularize your game into independent slices (e.g., a game layer, a HUD layer, a debug overlay).
+
+```cpp
+// engine/core/Layer.h
+class ENGINE_API Layer {
+public:
+    Layer(const std::string& name = "Layer");
+    virtual ~Layer();
+
+    virtual void OnAttach() {}    // Called when pushed onto the stack
+    virtual void OnDetach() {}    // Called when popped from the stack
+    virtual void OnUpdate(Timestep ts) {}
+    virtual void OnRender() {}
+    virtual void OnImGuiRender() {}
+    virtual void OnEvent(Event& event) {}
+
+    const std::string& GetName() const;
+};
+```
+
+```cpp
+// engine/core/LayerStack.h
+class ENGINE_API LayerStack {
+public:
+    void PushLayer(Layer* layer);      // Insert before overlays
+    void PushOverlay(Layer* overlay);  // Always on top
+    void PopLayer(Layer* layer);
+    void PopOverlay(Layer* overlay);
+};
+```
+
+**Layers** are inserted below overlays. **Overlays** always sit on top, making them suitable for debug panels, HUDs, and ImGui windows.
+
+Events propagate from the top of the stack downward (overlays first, then layers). Updates and renders propagate from bottom to top.
+
+```cpp
+int MyGame::OnInitialize() override {
+    PushLayer(new GameLayer());
+    PushOverlay(new HUDOverlay());
+    return 0;
+}
+```
+
+## Event system overview
+
+Events flow from platform code through the `Engine`, into your `Application::OnEvent`, and then down through the `LayerStack`. Use `EventDispatcher` to handle specific event types:
+
+```cpp
+void MyGame::OnEvent(Prisma::Event& e) {
+    // Always call the base to propagate to layers and the input manager
+    Prisma::Application::OnEvent(e);
+
+    Prisma::EventDispatcher dispatcher(e);
+    dispatcher.Dispatch<Prisma::KeyPressedEvent>([this](Prisma::KeyPressedEvent& ke) {
+        if (ke.GetKeyCode() == SDL_SCANCODE_ESCAPE) {
+            Close();
+        }
+        return true; // Mark event as handled
+    });
+}
+```
+
+Common event types: `WindowResizeEvent`, `WindowCloseEvent`, `KeyPressedEvent`, `KeyReleasedEvent`, and mouse events.
+
+<Warning>
+  A common pitfall is implementing `OnInitialize()` but never entering the engine main loop — for example, calling `engine.Initialize()` without calling `engine.Run(...)`. The program will start, complete initialization, and then exit immediately without rendering a single frame. Always ensure `engine.Run(std::move(app))` is called after `Initialize()` succeeds.
+</Warning>
+
+<Tip>
+  Use SDL scancode constants for key bindings rather than raw integer values. The engine window layer passes scancodes through its key events:
+
+  ```cpp
+  // Prefer
+  SDL_SCANCODE_W, SDL_SCANCODE_A, SDL_SCANCODE_S, SDL_SCANCODE_D
+  SDL_SCANCODE_SPACE   // Jump / confirm
+  SDL_SCANCODE_ESCAPE  // Pause / quit
+
+  // Avoid
+  0, 1, 2, 3  // Magic numbers that break across keyboard layouts
+  ```
+</Tip>
